@@ -73,12 +73,13 @@ async def get_submission_content(
 ) -> str:
     """Pull what a student actually submitted for an assignment — extracts readable text from
     uploaded files (PDF/DOCX/text), or returns the typed text / URL for other submission types.
+    Also includes the submission comment thread (students often paste links there).
     Use this before grade_submission or grade_with_rubric so you're grading the real content."""
     course_id = await get_course_id(course_identifier)
     sub = await canvas_request(
         "GET",
         f"/courses/{course_id}/assignments/{assignment_id}/submissions/{user_id}",
-        params={"include[]": "submission_history"},
+        params={"include[]": ["submission_history", "submission_comments"]},
     )
 
     submission_type = sub.get("submission_type")
@@ -88,41 +89,50 @@ async def get_submission_content(
         f"attempt={sub.get('attempt')}\n"
     )
 
+    comments = sub.get("submission_comments", []) or []
+    comments_block = ""
+    if comments:
+        comment_lines = [
+            f"[{format_date(c.get('created_at'))}] {c.get('author_name', '?')}: {c.get('comment', '')}"
+            for c in comments
+        ]
+        comments_block = "\n\nSubmission comments:\n" + "\n".join(comment_lines)
+
     if submission_type is None:
-        return header + "\nNothing submitted yet."
+        return header + "\nNothing submitted yet." + comments_block
 
     if submission_type == "online_text_entry":
-        return header + f"\n{sub.get('body', '(empty)')}"
+        return header + f"\n{sub.get('body', '(empty)')}" + comments_block
 
     if submission_type == "online_url":
-        return header + f"\nSubmitted URL: {sub.get('url')}"
+        return header + f"\nSubmitted URL: {sub.get('url')}" + comments_block
 
     if submission_type == "discussion_topic":
         entries = sub.get("discussion_entries", []) or []
         if not entries:
-            return header + "\nNo discussion entries found on this submission."
+            return header + "\nNo discussion entries found on this submission." + comments_block
         parts = [header]
         for e in entries:
             parts.append(f"[{format_date(e.get('created_at'))}] {e.get('user_name', '?')}:\n{e.get('message', '')}")
-        return "\n\n".join(parts)
+        return "\n\n".join(parts) + comments_block
 
     if submission_type == "online_upload":
         attachments = sub.get("attachments", []) or []
         if not attachments:
-            return header + "\nNo attachments found on this submission."
+            return header + "\nNo attachments found on this submission." + comments_block
         parts = [header]
         for att in attachments:
             text = await download_and_extract_text(
                 att["url"], att.get("content-type", ""), att.get("display_name", att.get("filename", "file"))
             )
             parts.append(text)
-        return "\n\n---\n\n".join(parts)
+        return "\n\n---\n\n".join(parts) + comments_block
 
     return header + (
         f"\nSubmission type '{submission_type}' isn't supported for content extraction "
         f"(only online_text_entry, online_url, and online_upload are). Raw data: "
         f"{ {k: sub.get(k) for k in ['url', 'media_comment_id', 'body']} }"
-    )
+    ) + comments_block
 
 
 async def create_assignment(
