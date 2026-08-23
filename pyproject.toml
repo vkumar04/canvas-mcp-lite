@@ -1,0 +1,22 @@
+[project]
+name = "canvas-mcp-lite"
+version = "0.1.0"
+description = "Lean, instructor-focused Canvas LMS MCP server"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "pypdf>=5.0",
+    "python-docx>=1.1",
+]
+
+[project.scripts]
+canvas-mcp-lite = "canvas_mcp_lite.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["canvas_mcp_lite"]

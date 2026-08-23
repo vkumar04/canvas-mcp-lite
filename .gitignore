@@ -1,0 +1,13 @@
+# Secrets — never commit Canvas credentials
+.env
+
+# Local machine state
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.claude/settings.local.json
+
+# Build
+dist/
+*.egg-info/
