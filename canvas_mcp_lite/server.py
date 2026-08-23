@@ -97,14 +97,22 @@ for fn in READ_TOOLS + WRITE_TOOLS + DELETE_TOOLS:
 def main() -> None:
     transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
     if transport == "http":
-        # Remote deployment (e.g. Railway). MCP_PATH should be set to a long
-        # random path — it is the only gate on a server that can read/write a
-        # Canvas gradebook, since claude.ai custom connectors send no custom
-        # headers. Refuse to start wide-open on the default path.
-        path = os.environ.get("MCP_PATH", "")
-        if not path or path == "/mcp":
+        authkit_domain = os.environ.get("AUTHKIT_DOMAIN", "").strip()
+        path = os.environ.get("MCP_PATH", "/mcp" if authkit_domain else "")
+
+        if authkit_domain:
+            base_url = os.environ.get("BASE_URL", "").strip()
+            if not base_url:
+                raise RuntimeError(
+                    "AUTHKIT_DOMAIN is set but BASE_URL is not. Set BASE_URL to this "
+                    "server's public origin, e.g. https://myapp.up.railway.app"
+                )
+            from fastmcp.server.auth.providers.workos import AuthKitProvider
+
+            mcp.auth = AuthKitProvider(authkit_domain=authkit_domain, base_url=base_url)
+        elif not path or path == "/mcp":
             raise RuntimeError(
-                "HTTP mode requires MCP_PATH set to a secret path, e.g. "
+                "HTTP mode without OAuth requires MCP_PATH set to a secret path, e.g. "
                 "/mcp-<long-random-string> — refusing to serve on a guessable path."
             )
         if not path.startswith("/"):
