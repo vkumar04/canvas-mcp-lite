@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from fastmcp import FastMCP
 
 from .tools import (
@@ -93,7 +95,28 @@ for fn in READ_TOOLS + WRITE_TOOLS + DELETE_TOOLS:
 
 
 def main() -> None:
-    mcp.run()
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+    if transport == "http":
+        # Remote deployment (e.g. Railway). MCP_PATH should be set to a long
+        # random path — it is the only gate on a server that can read/write a
+        # Canvas gradebook, since claude.ai custom connectors send no custom
+        # headers. Refuse to start wide-open on the default path.
+        path = os.environ.get("MCP_PATH", "")
+        if not path or path == "/mcp":
+            raise RuntimeError(
+                "HTTP mode requires MCP_PATH set to a secret path, e.g. "
+                "/mcp-<long-random-string> — refusing to serve on a guessable path."
+            )
+        if not path.startswith("/"):
+            path = "/" + path
+        mcp.run(
+            transport="http",
+            host="0.0.0.0",
+            port=int(os.environ.get("PORT", "8000")),
+            path=path,
+        )
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":
