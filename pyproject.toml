@@ -11,6 +11,9 @@ dependencies = [
     "python-docx>=1.1",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
 [project.scripts]
 canvas-mcp-lite = "canvas_mcp_lite.server:main"
 

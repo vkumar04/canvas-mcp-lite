@@ -4,17 +4,18 @@ A lean, instructor-focused [MCP](https://modelcontextprotocol.io) server for Can
 
 ## Tools
 
-About 59 tools across 11 Canvas domains, organized by risk level:
+64 tools across 11 Canvas domains, organized by risk level:
 
 | Group | Count | Examples |
 |---|---|---|
-| Read | 29 | `list_courses`, `get_course_structure`, `list_submissions`, `get_submission_content`, `get_rubric`, `get_student_analytics` |
-| Write | 21 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `bulk_grade_submissions`, `create_announcement`, `send_message`, `upload_course_file` |
+| Read | 32 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `list_quiz_submissions`, `get_student_analytics` |
+| Write | 23 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `create_announcement`, `send_message`, `upload_course_file` |
 | Delete | 9 | `delete_assignment`, `delete_page`, `bulk_delete_announcements` |
 
 Highlights:
 
-- **Read what students actually submitted** — `get_submission_content` extracts text from uploaded PDFs, DOCX files, and plain text (plus typed text entries, URLs, and discussion submissions), so grading tools work from real content.
+- **Read what students actually submitted** — `get_submission_content` extracts text from uploaded PDFs, DOCX files, and plain text (plus typed text entries, URLs, and discussion submissions) and includes the submission comment thread, so grading tools work from real content.
+- **A real grading workflow** — `list_ungraded_submissions` is the grading queue, `grade_submission` handles points, pass/fail, letter, and percent grades (and reports partial success when Canvas saves a comment but rejects a grade), and `post_grades`/`hide_grades` control when students see results.
 - **Course codes or IDs** — every course-scoped tool accepts either a numeric course ID or a `course_code` string (resolved with a short-TTL cache).
 - **Safe by default** — assignments and pages are created unpublished unless you say otherwise; destructive tools are clearly marked.
 - **LLM-friendly output** — every tool returns formatted, readable text rather than raw JSON.

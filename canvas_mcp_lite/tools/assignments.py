@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Union
 
-from ..client import canvas_paginated, canvas_request
+from ..client import canvas_paginated, canvas_request, truncation_note
 from ..util import format_date, get_course_id
 from .files import download_and_extract_text
 
@@ -133,6 +133,64 @@ async def get_submission_content(
         f"(only online_text_entry, online_url, and online_upload are). Raw data: "
         f"{ {k: sub.get(k) for k in ['url', 'media_comment_id', 'body']} }"
     ) + comments_block
+
+
+async def list_ungraded_submissions(course_identifier: Union[str, int]) -> str:
+    """The grading queue: every submitted-but-ungraded submission in a course,
+    grouped by assignment. Start here for 'what do I need to grade?'"""
+    course_id = await get_course_id(course_identifier)
+    assignments = await canvas_paginated(f"/courses/{course_id}/assignments")
+    needing = [a for a in assignments if (a.get("needs_grading_count") or 0) > 0]
+    if not needing:
+        return "Nothing to grade — no assignments have ungraded submissions."
+
+    sections = []
+    for a in needing:
+        subs = await canvas_paginated(
+            f"/courses/{course_id}/assignments/{a['id']}/submissions",
+            {"include[]": "user", "workflow_state": "submitted"},
+        )
+        ungraded = [s for s in subs if s.get("workflow_state") in ("submitted", "pending_review")]
+        lines = [
+            f"- {(s.get('user') or {}).get('name', 'Unknown')} (user_id={s.get('user_id')}), "
+            f"submitted {format_date(s.get('submitted_at'))}"
+            f"{' [LATE]' if s.get('late') else ''}"
+            for s in ungraded
+        ]
+        sections.append(
+            f"{a.get('name')} (assignment_id={a.get('id')}, due {format_date(a.get('due_at'))}) — "
+            f"{len(ungraded)} to grade:\n" + "\n".join(lines)
+        )
+    return f"Grading queue for course {course_id}:\n\n" + "\n\n".join(sections)
+
+
+async def list_missing_submissions(course_identifier: Union[str, int]) -> str:
+    """List students with missing (past-due, not submitted) work across all assignments
+    in a course, grouped by assignment. Use for 'who hasn't turned in X?'"""
+    course_id = await get_course_id(course_identifier)
+    subs = await canvas_paginated(
+        f"/courses/{course_id}/students/submissions",
+        {"student_ids[]": "all", "include[]": ["user", "assignment"], "workflow_state": "unsubmitted"},
+    )
+    missing = [s for s in subs if s.get("missing")]
+    if not missing:
+        return "No missing submissions." + truncation_note(subs)
+
+    by_assignment: dict[str, list[str]] = {}
+    for s in missing:
+        a_name = (s.get("assignment") or {}).get("name", f"assignment {s.get('assignment_id')}")
+        student = (s.get("user") or {}).get("name", f"user_id={s.get('user_id')}")
+        by_assignment.setdefault(a_name, []).append(student)
+
+    sections = [
+        f"{name} — {len(students)} missing:\n" + "\n".join(f"- {s}" for s in sorted(students))
+        for name, students in by_assignment.items()
+    ]
+    return (
+        f"Missing submissions in course {course_id}:\n\n"
+        + "\n\n".join(sections)
+        + truncation_note(subs)
+    )
 
 
 async def create_assignment(

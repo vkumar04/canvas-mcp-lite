@@ -23,6 +23,23 @@ async def list_quizzes(course_identifier: Union[str, int]) -> str:
     return f"Quizzes in course {course_id}:\n\n" + "\n\n".join(lines)
 
 
+async def list_quiz_submissions(course_identifier: Union[str, int], quiz_id: Union[str, int]) -> str:
+    """List student submissions for a classic quiz with scores and completion status."""
+    course_id = await get_course_id(course_identifier)
+    # This endpoint wraps each page in {"quiz_submissions": [...]}.
+    pages = await canvas_paginated(f"/courses/{course_id}/quizzes/{quiz_id}/submissions")
+    subs = [s for page in pages for s in (page.get("quiz_submissions") or [])]
+    if not subs:
+        return "No quiz submissions found."
+    lines = [
+        f"- user_id={s.get('user_id')}: {s.get('workflow_state')}, "
+        f"score={s.get('score')}/{s.get('quiz_points_possible')}, "
+        f"attempt={s.get('attempt')}, finished={format_date(s.get('finished_at'))}"
+        for s in subs
+    ]
+    return f"Submissions for quiz {quiz_id}:\n\n" + "\n".join(lines)
+
+
 async def get_quiz_details(course_identifier: Union[str, int], quiz_id: Union[str, int]) -> str:
     """Get details for one classic quiz, including question count and time limit."""
     course_id = await get_course_id(course_identifier)

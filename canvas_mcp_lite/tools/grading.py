@@ -4,7 +4,7 @@ import asyncio
 import json
 from typing import Optional, Union
 
-from ..client import canvas_paginated, canvas_request
+from ..client import CanvasAPIError, canvas_graphql, canvas_paginated, canvas_request
 from ..util import get_course_id
 
 
@@ -13,32 +13,104 @@ async def grade_submission(
     assignment_id: Union[str, int],
     user_id: Union[str, int],
     score: Optional[float] = None,
+    grade: Optional[str] = None,
     comment: Optional[str] = None,
     excuse: bool = False,
 ) -> str:
     """Post a grade and/or comment for one student's submission on one assignment.
+    Use score for points-based assignments. Use grade for other grading types:
+    'complete'/'incomplete' (pass_fail), a letter like 'A-' (letter_grade), or '85%' (percent).
     Set excuse=True to mark the assignment excused for this student instead of scoring it."""
     course_id = await get_course_id(course_identifier)
     payload: dict = {}
     if excuse:
         payload["submission"] = {"excuse": True}
+    elif grade is not None:
+        payload["submission"] = {"posted_grade": grade}
     elif score is not None:
         payload["submission"] = {"posted_grade": score}
     if comment:
         payload["comment"] = {"text_comment": comment}
     if not payload:
-        return "Nothing to do — provide score, comment, and/or excuse=True."
+        return "Nothing to do — provide score, grade, comment, and/or excuse=True."
 
-    result = await canvas_request(
-        "PUT",
-        f"/courses/{course_id}/assignments/{assignment_id}/submissions/{user_id}",
-        json_body=payload,
-    )
+    url = f"/courses/{course_id}/assignments/{assignment_id}/submissions/{user_id}"
+    try:
+        result = await canvas_request("PUT", url, json_body=payload)
+    except CanvasAPIError as exc:
+        # Canvas saves the comment before processing the grade, so a failed call
+        # may still have posted its comment. Report what actually landed so the
+        # caller doesn't blindly retry and double-post.
+        lines = [f"Grading call failed: {exc}"]
+        try:
+            check = await canvas_request("GET", url, params={"include[]": "submission_comments"})
+        except CanvasAPIError:
+            return lines[0]
+        if comment:
+            landed = any(
+                (c.get("comment") or "").strip() == comment.strip()
+                for c in check.get("submission_comments") or []
+            )
+            if landed:
+                lines.append(
+                    "HOWEVER: the comment WAS saved despite the error — do NOT resend it."
+                )
+            else:
+                lines.append("The comment was NOT saved.")
+        lines.append(
+            f"Current state: score={check.get('score')}, grade={check.get('grade')}, "
+            f"excused={check.get('excused')}, workflow_state={check.get('workflow_state')}"
+        )
+        return "\n".join(lines)
+
     return (
         f"Graded user {user_id}: score={result.get('score')}, "
         f"grade={result.get('grade')}, excused={result.get('excused')}, "
         f"workflow_state={result.get('workflow_state')}"
     )
+
+
+async def post_grades(
+    course_identifier: Union[str, int],
+    assignment_id: Union[str, int],
+    graded_only: bool = True,
+) -> str:
+    """Release hidden ("muted") grades on an assignment so students can see them.
+    graded_only=True (default) posts only submissions that have been graded.
+    Students are notified when grades post — use deliberately, not as a test."""
+    await get_course_id(course_identifier)  # validates the identifier
+    mutation = """
+    mutation ($assignmentId: ID!, $gradedOnly: Boolean) {
+      postAssignmentGrades(input: {assignmentId: $assignmentId, gradedOnly: $gradedOnly}) {
+        progress { _id state }
+      }
+    }
+    """
+    data = await canvas_graphql(
+        mutation, {"assignmentId": str(assignment_id), "gradedOnly": graded_only}
+    )
+    progress = (data.get("postAssignmentGrades") or {}).get("progress") or {}
+    return (
+        f"Posting grades for assignment {assignment_id} "
+        f"(graded_only={graded_only}): {progress.get('state', 'queued')}"
+    )
+
+
+async def hide_grades(
+    course_identifier: Union[str, int], assignment_id: Union[str, int]
+) -> str:
+    """Hide an assignment's grades from students (the inverse of post_grades)."""
+    await get_course_id(course_identifier)
+    mutation = """
+    mutation ($assignmentId: ID!) {
+      hideAssignmentGrades(input: {assignmentId: $assignmentId}) {
+        progress { _id state }
+      }
+    }
+    """
+    data = await canvas_graphql(mutation, {"assignmentId": str(assignment_id)})
+    progress = (data.get("hideAssignmentGrades") or {}).get("progress") or {}
+    return f"Hiding grades for assignment {assignment_id}: {progress.get('state', 'queued')}"
 
 
 async def bulk_grade_submissions(

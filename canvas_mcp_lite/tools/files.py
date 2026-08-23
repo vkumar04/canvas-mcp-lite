@@ -13,6 +13,16 @@ from ..client import canvas_paginated, canvas_request
 from ..util import get_course_id
 
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024  # 25MB
+MAX_TEXT_CHARS = 60_000
+
+
+def _cap_text(text: str, name: str) -> str:
+    if len(text) <= MAX_TEXT_CHARS:
+        return text
+    return (
+        text[:MAX_TEXT_CHARS]
+        + f"\n\n[... truncated: showing first {MAX_TEXT_CHARS} of {len(text)} characters of '{name}']"
+    )
 
 
 async def download_and_extract_text(url: str, content_type: str, name: str) -> str:
@@ -31,7 +41,7 @@ async def download_and_extract_text(url: str, content_type: str, name: str) -> s
         text = "\n\n".join(pages_text).strip()
         if not text:
             return f"'{name}': PDF has no extractable text (may be scanned/image-based)."
-        return f"'{name}' ({len(reader.pages)} pages):\n\n{text}"
+        return f"'{name}' ({len(reader.pages)} pages):\n\n{_cap_text(text, name)}"
 
     is_docx = (
         content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -43,10 +53,10 @@ async def download_and_extract_text(url: str, content_type: str, name: str) -> s
         text = "\n\n".join(paragraphs).strip()
         if not text:
             return f"'{name}': DOCX has no extractable paragraph text (may be tables/images only)."
-        return f"'{name}' ({len(paragraphs)} paragraphs):\n\n{text}"
+        return f"'{name}' ({len(paragraphs)} paragraphs):\n\n{_cap_text(text, name)}"
 
     if content_type.startswith("text/"):
-        return f"'{name}':\n\n{content.decode('utf-8', errors='replace')}"
+        return f"'{name}':\n\n{_cap_text(content.decode('utf-8', errors='replace'), name)}"
 
     return (
         f"'{name}' is type '{content_type}' — text extraction not supported for this type "

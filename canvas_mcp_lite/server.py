@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 
 from .tools import (
     analytics,
@@ -20,7 +22,22 @@ from .tools import (
     quizzes,
 )
 
+access_log = logging.getLogger("canvas_mcp_lite.access")
+
+
+class AccessLogMiddleware(Middleware):
+    """One line per tool call (tool name + course), no student data. Goes to
+    stderr, so it's visible in `railway logs` and safe in stdio mode."""
+
+    async def on_call_tool(self, context, call_next):
+        args = getattr(context.message, "arguments", None) or {}
+        course = args.get("course_identifier", "-")
+        access_log.info("tool=%s course=%s", context.message.name, course)
+        return await call_next(context)
+
+
 mcp = FastMCP("canvas-mcp-lite")
+mcp.add_middleware(AccessLogMiddleware())
 
 READ_TOOLS = [
     courses.list_courses,
@@ -37,6 +54,8 @@ READ_TOOLS = [
     assignments.get_assignment_details,
     assignments.list_submissions,
     assignments.get_submission_content,
+    assignments.list_ungraded_submissions,
+    assignments.list_missing_submissions,
     announcements.list_announcements,
     discussions.list_discussion_topics,
     discussions.get_discussion_topic_details,
@@ -45,6 +64,7 @@ READ_TOOLS = [
     files.read_course_file,
     quizzes.list_quizzes,
     quizzes.get_quiz_details,
+    quizzes.list_quiz_submissions,
     grading.list_rubrics,
     grading.get_rubric,
     messaging.list_conversations,
@@ -73,6 +93,8 @@ WRITE_TOOLS = [
     grading.bulk_grade_submissions,
     grading.grade_with_rubric,
     grading.create_rubric,
+    grading.post_grades,
+    grading.hide_grades,
     messaging.send_message,
     peer_review.assign_peer_review,
     files.upload_course_file,
@@ -95,6 +117,12 @@ for fn in READ_TOOLS + WRITE_TOOLS + DELETE_TOOLS:
 
 
 def main() -> None:
+    if not access_log.handlers:
+        handler = logging.StreamHandler()  # stderr — never stdout (stdio transport)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+        access_log.addHandler(handler)
+        access_log.setLevel(logging.INFO)
+
     transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
     if transport == "http":
         # Remote deployment (e.g. Railway). MCP_PATH should be set to a long
