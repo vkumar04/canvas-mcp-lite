@@ -8,7 +8,7 @@ A lean, instructor-focused [MCP](https://modelcontextprotocol.io) server for Can
 
 | Group | Count | Examples |
 |---|---|---|
-| Read | 32 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `list_quiz_submissions`, `get_student_analytics` |
+| Read | 33 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `get_submission_forensics`, `get_student_analytics` |
 | Write | 23 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `create_announcement`, `send_message`, `upload_course_file` |
 | Delete | 9 | `delete_assignment`, `delete_page`, `bulk_delete_announcements` |
 
