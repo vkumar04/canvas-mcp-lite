@@ -4,12 +4,12 @@ A lean, instructor-focused [MCP](https://modelcontextprotocol.io) server for Can
 
 ## Tools
 
-69 tools across 12 domains, organized by risk level:
+71 tools across 12 domains, organized by risk level:
 
 | Group | Count | Examples |
 |---|---|---|
-| Read | 36 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `get_submission_forensics`, `read_google_doc` |
-| Write | 24 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `comment_on_google_doc`, `send_message`, `upload_course_file` |
+| Read | 37 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `get_submission_forensics`, `read_google_doc` |
+| Write | 25 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `comment_on_google_doc`, `send_message`, `upload_course_file` |
 | Delete | 9 | `delete_assignment`, `delete_page`, `bulk_delete_announcements` |
 
 Highlights:
@@ -25,11 +25,13 @@ Highlights:
 
 Students in writing courses often submit a Google Doc link rather than a file — commonly pasted as a submission comment. With a Google account connected, the grading loop becomes: `list_google_doc_links` (one call collects every student's doc link from their submission comments or URL submissions, and flags who hasn't posted one) → `read_google_doc` (read the live draft) → `comment_on_google_doc` (one call per piece of feedback, quoting the passage it refers to) → `grade_submission` (score in Canvas).
 
-One-time setup, done by the instructor **on their own machine** — the server never needs an interactive Google login:
+### Connecting a Google account
 
-1. At [console.cloud.google.com](https://console.cloud.google.com): create a project, enable the **Google Drive API**, configure the OAuth consent screen (External; add yourself as a test user, and publish the app so refresh tokens don't expire after 7 days), and create an **OAuth client ID** of type **Desktop app**.
-2. Run `canvas-mcp-google-auth` and sign in when the browser opens. Use `--manual` if the terminal is on a different machine than the browser.
-3. Say yes to saving, or copy the printed `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and `GOOGLE_OAUTH_REFRESH_TOKEN` into the server's environment (Railway → Variables for remote deployments). Restart the server.
+**Remote/HTTP servers — in-chat, no terminal (recommended).** The instructor asks Claude to run `google_docs_status` / `connect_google_docs`, opens the sign-in link it returns in their browser, and approves. The redirect lands on the server's public `/oauth/google/callback` route, which activates commenting immediately and shows a `GOOGLE_OAUTH_REFRESH_TOKEN` value to save in the server's environment (Railway → Variables) so the connection survives restarts. Completing the flow requires a single-use state minted by the tool (which sits behind the secret `MCP_PATH`), so the public callback can't be abused to swap accounts.
+
+One-time **admin** prerequisite at [console.cloud.google.com](https://console.cloud.google.com): create a project, enable the **Google Drive API**, configure and publish the OAuth consent screen (unpublished "Testing" apps expire refresh tokens after 7 days), create an **OAuth client ID** of type **Web application** with authorized redirect URI `https://<server-domain>/oauth/google/callback`, and set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` in the server's environment.
+
+**Local stdio servers — terminal.** Create a **Desktop app** OAuth client instead, run `canvas-mcp-google-auth`, and sign in when the browser opens (use `--manual` if the terminal is on a different machine than the browser). It saves all three `GOOGLE_OAUTH_*` values to `.env`.
 
 Notes:
 

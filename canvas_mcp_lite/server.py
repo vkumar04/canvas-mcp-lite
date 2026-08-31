@@ -7,7 +7,10 @@ import os
 
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import HTMLResponse
 
+from .google_oauth_flow import CALLBACK_PATH, handle_callback
 from .tools import (
     analytics,
     announcements,
@@ -41,6 +44,15 @@ class AccessLogMiddleware(Middleware):
 mcp = FastMCP("canvas-mcp-lite")
 mcp.add_middleware(AccessLogMiddleware())
 
+
+# Public (not behind MCP_PATH) — Google must be able to redirect here. Safe
+# because completing a flow requires a single-use state minted by the
+# connect_google_docs tool, which IS behind the secret path.
+@mcp.custom_route(CALLBACK_PATH, methods=["GET"])
+async def google_oauth_callback(request: Request) -> HTMLResponse:
+    status_code, page = await handle_callback(dict(request.query_params))
+    return HTMLResponse(page, status_code=status_code)
+
 READ_TOOLS = [
     courses.list_courses,
     courses.get_course_details,
@@ -65,6 +77,7 @@ READ_TOOLS = [
     discussions.list_discussion_entries,
     files.list_course_files,
     files.read_course_file,
+    google_docs.google_docs_status,
     google_docs.list_google_doc_links,
     google_docs.read_google_doc,
     google_docs.list_google_doc_comments,
@@ -95,6 +108,7 @@ WRITE_TOOLS = [
     modules_pages.update_module_item,
     assignments.create_assignment,
     assignments.update_assignment,
+    google_docs.connect_google_docs,
     google_docs.comment_on_google_doc,
     grading.grade_submission,
     grading.bulk_grade_submissions,

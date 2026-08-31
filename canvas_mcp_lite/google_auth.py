@@ -26,9 +26,13 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-from .google_client import GOOGLE_DRIVE_API, GOOGLE_DRIVE_SCOPE, GOOGLE_TOKEN_URL
+from .google_client import (
+    GOOGLE_AUTH_URL,
+    GOOGLE_DRIVE_API,
+    GOOGLE_DRIVE_SCOPE,
+    GOOGLE_TOKEN_URL,
+)
 
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 

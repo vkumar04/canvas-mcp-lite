@@ -21,16 +21,17 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_DRIVE_API = "https://www.googleapis.com/drive/v3"
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 SETUP_MESSAGE = (
-    "Google Docs integration isn't configured on this server. The instructor "
-    "needs to run `canvas-mcp-google-auth` once (in a browser on their own "
-    "machine) to connect their Google account, then set GOOGLE_OAUTH_CLIENT_ID, "
-    "GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REFRESH_TOKEN in the server's "
-    ".env (or Railway environment variables) and restart the server."
+    "The instructor's Google account isn't connected yet. Run the "
+    "google_docs_status tool to see what's missing, then connect_google_docs to "
+    "get a sign-in link the instructor opens in their browser — approving it "
+    "activates Google Docs commenting. (Local stdio servers can run the "
+    "`canvas-mcp-google-auth` terminal command instead.)"
 )
 
 
@@ -45,10 +46,22 @@ class GoogleAPIError(Exception):
         super().__init__(f"Google Drive API error {status_code} for {url}: {message}")
 
 
+# Refresh token minted through the in-chat connect_google_docs flow this
+# process lifetime — takes precedence over the (possibly stale) env value.
+_runtime_refresh_token: Optional[str] = None
+
+
+def set_runtime_refresh_token(token: str) -> None:
+    global _runtime_refresh_token, _access_token, _token_expires_at
+    _runtime_refresh_token = token
+    _access_token = None
+    _token_expires_at = 0.0
+
+
 def _credentials() -> tuple[str, str, str]:
     client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
     client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
-    refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "")
+    refresh_token = _runtime_refresh_token or os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "")
     if not (client_id and client_secret and refresh_token):
         raise GoogleConfigError(SETUP_MESSAGE)
     return client_id, client_secret, refresh_token

@@ -6,6 +6,8 @@ from __future__ import annotations
 import re
 from typing import Union
 
+import os
+
 from ..client import canvas_paginated
 from ..google_client import (
     GoogleAPIError,
@@ -14,6 +16,7 @@ from ..google_client import (
     extract_doc_id,
     google_request,
 )
+from ..google_oauth_flow import begin_auth, redirect_uri
 from ..util import format_date, get_course_id
 from .files import _cap_text
 
@@ -38,6 +41,61 @@ async def _explain_api_error(exc: GoogleAPIError, doc_id: str) -> str:
             "with the link — Commenter'), then try again."
         )
     return str(exc)
+
+
+async def google_docs_status() -> str:
+    """Check whether Google Docs grading is set up on this server: which
+    credentials are present, which Google account is connected, and the next
+    setup step if anything is missing. Run this first when a Google Docs tool
+    reports a configuration problem."""
+    has_client = bool(
+        os.environ.get("GOOGLE_OAUTH_CLIENT_ID") and os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+    )
+    lines = ["Google Docs grading setup:"]
+    lines.append(f"- OAuth client (admin-provided): {'configured' if has_client else 'MISSING'}")
+    if not has_client:
+        lines.append(
+            "\nNext step (server admin, one-time): at console.cloud.google.com enable "
+            "the Google Drive API, publish the OAuth consent screen, create a 'Web "
+            "application' OAuth client with authorized redirect URI "
+            f"{redirect_uri() or '<server URL>/oauth/google/callback'}, and set "
+            "GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET in the server env."
+        )
+        return "\n".join(lines)
+
+    email = await connected_account_email()
+    if email:
+        lines.append(f"- Connected Google account: {email} — doc comments will post as this account.")
+        lines.append("\nEverything is ready. Use connect_google_docs only to switch accounts.")
+    else:
+        lines.append("- Connected Google account: NONE (or the stored token stopped working)")
+        lines.append(
+            "\nNext step (instructor): run the connect_google_docs tool, open the "
+            "sign-in link it returns, and approve access with the Google account "
+            "that should own the doc comments."
+        )
+    return "\n".join(lines)
+
+
+async def connect_google_docs() -> str:
+    """Connect (or switch) the Google account used for doc commenting — returns a
+    Google sign-in link for the INSTRUCTOR to open in their own browser. Approving
+    lands back on this server and activates commenting immediately; the page also
+    shows the GOOGLE_OAUTH_REFRESH_TOKEN to store in the server's environment so
+    the connection survives restarts. Comments post as whichever account approves,
+    so the instructor — not an assistant — should click the link."""
+    try:
+        url = begin_auth()
+    except GoogleConfigError as exc:
+        return str(exc)
+    return (
+        "Have the instructor open this link in their browser and approve access "
+        "(valid for 10 minutes, single use):\n\n"
+        f"{url}\n\n"
+        "The confirmation page activates commenting right away and shows a "
+        "GOOGLE_OAUTH_REFRESH_TOKEN value to save in the server's environment "
+        "(Railway → Variables) so the connection survives restarts."
+    )
 
 
 _LINK_PATTERN = re.compile(r"https://(?:docs|drive)\.google\.com/\S+")
