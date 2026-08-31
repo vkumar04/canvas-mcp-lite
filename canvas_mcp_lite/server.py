@@ -53,6 +53,52 @@ async def google_oauth_callback(request: Request) -> HTMLResponse:
     status_code, page = await handle_callback(dict(request.query_params))
     return HTMLResponse(page, status_code=status_code)
 
+
+_PAGE_STYLE = (
+    "<style>body{font-family:system-ui;max-width:44rem;margin:4rem auto;"
+    "padding:0 1rem;line-height:1.6}</style>"
+)
+
+# Public homepage and privacy policy: Google requires both URLs (on an
+# authorized domain) before an OAuth app can be published to production.
+@mcp.custom_route("/", methods=["GET"])
+async def homepage(request: Request) -> HTMLResponse:
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>Canvas Grading Assistant</title>{_PAGE_STYLE}</head><body>"
+        "<h1>Canvas Grading Assistant</h1>"
+        "<p>A private teaching-assistant service (an MCP server) used by an "
+        "instructor to manage Canvas LMS coursework and provide feedback on "
+        "student writing, including comments on Google Docs that students "
+        "share with the instructor.</p>"
+        "<p><a href='/privacy'>Privacy policy</a></p>"
+        "</body></html>"
+    )
+
+
+@mcp.custom_route("/privacy", methods=["GET"])
+async def privacy_policy(request: Request) -> HTMLResponse:
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>Privacy Policy — Canvas Grading Assistant</title>{_PAGE_STYLE}</head><body>"
+        "<h1>Privacy Policy</h1>"
+        "<p>Canvas Grading Assistant is a private, single-instructor tool. It is "
+        "not a public service and has no users other than the instructor who "
+        "operates it.</p>"
+        "<h2>Google user data</h2>"
+        "<p>With the instructor's explicit authorization via Google sign-in, the "
+        "service accesses Google Drive solely to: (1) read the text of documents "
+        "students have shared with the instructor for grading, and (2) post "
+        "feedback comments on those documents on the instructor's behalf.</p>"
+        "<p>The service stores only the OAuth credentials needed to act on the "
+        "instructor's behalf. It does not store document contents, sell or share "
+        "any data with third parties, use data for advertising, or transfer data "
+        "to any service other than Google's and Canvas's own APIs.</p>"
+        "<p>Access can be revoked at any time at "
+        "<a href='https://myaccount.google.com/permissions'>myaccount.google.com/permissions</a>.</p>"
+        "</body></html>"
+    )
+
 READ_TOOLS = [
     courses.list_courses,
     courses.get_course_details,
