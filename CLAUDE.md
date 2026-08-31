@@ -9,7 +9,8 @@ All source lives in the `canvas_mcp_lite/` package directory:
 - `server.py` — FastMCP entry point. Registers every tool from `tools/`. Tools are grouped into `READ_TOOLS`, `WRITE_TOOLS`, and `DELETE_TOOLS` lists — the grouping documents intent (all register identically). **When adding a tool, add it to the correct list.**
 - `client.py` — async Canvas API client (httpx). Bearer auth from `.env`, `canvas_request` for single calls, `canvas_paginated` for Link-header pagination (defaults `per_page=100`), retry with exponential backoff on timeouts/connect errors, raises `CanvasAPIError` on non-2xx.
 - `util.py` — `get_course_id` resolves a numeric ID or `course_code` string (5-minute TTL cache; do not make it permanent — stale code→ID mappings were a real bug), `format_date`, `announcement_posting_status`.
-- `tools/` — one module per Canvas domain: courses, modules_pages, assignments, announcements, discussions, files, quizzes, grading, messaging, peer_review, analytics.
+- `google_client.py` — Google Drive API client for grading Google Docs submissions in place. Auth is a long-lived OAuth **refresh token** in the env (`GOOGLE_OAUTH_CLIENT_ID/SECRET/REFRESH_TOKEN`) minted once by the instructor via `google_auth.py` (`canvas-mcp-google-auth` console script) on their own machine — the server never does interactive login. Tools return the setup message (not an exception) when unconfigured.
+- `tools/` — one module per domain: courses, modules_pages, assignments, announcements, discussions, files, quizzes, grading, messaging, peer_review, analytics, integrity, google_docs. `google_docs.comment_on_google_doc` posts real Google Docs comments as the connected account; the Drive API can't anchor comments to a range, so `quoted_text` (shown in the comment card) is the anchor — keep that contract.
 
 ## Conventions
 

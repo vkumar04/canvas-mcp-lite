@@ -16,6 +16,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 canvas-mcp-lite = "canvas_mcp_lite.server:main"
+canvas-mcp-google-auth = "canvas_mcp_lite.google_auth:main"
 
 [build-system]
 requires = ["hatchling"]

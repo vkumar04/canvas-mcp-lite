@@ -4,12 +4,12 @@ A lean, instructor-focused [MCP](https://modelcontextprotocol.io) server for Can
 
 ## Tools
 
-64 tools across 11 Canvas domains, organized by risk level:
+69 tools across 12 domains, organized by risk level:
 
 | Group | Count | Examples |
 |---|---|---|
-| Read | 33 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `get_submission_forensics`, `get_student_analytics` |
-| Write | 23 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `create_announcement`, `send_message`, `upload_course_file` |
+| Read | 36 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `get_submission_forensics`, `read_google_doc` |
+| Write | 24 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `comment_on_google_doc`, `send_message`, `upload_course_file` |
 | Delete | 9 | `delete_assignment`, `delete_page`, `bulk_delete_announcements` |
 
 Highlights:
@@ -19,6 +19,24 @@ Highlights:
 - **Course codes or IDs** — every course-scoped tool accepts either a numeric course ID or a `course_code` string (resolved with a short-TTL cache).
 - **Safe by default** — assignments and pages are created unpublished unless you say otherwise; destructive tools are clearly marked.
 - **LLM-friendly output** — every tool returns formatted, readable text rather than raw JSON.
+- **Grade Google Docs in place** — when students submit Google Doc links, `read_google_doc` reads the live document and `comment_on_google_doc` leaves feedback as real Google Docs comments from the instructor's account (see below).
+
+## Google Docs grading (optional)
+
+Students in writing courses often submit a Google Doc link rather than a file — commonly pasted as a submission comment. With a Google account connected, the grading loop becomes: `list_google_doc_links` (one call collects every student's doc link from their submission comments or URL submissions, and flags who hasn't posted one) → `read_google_doc` (read the live draft) → `comment_on_google_doc` (one call per piece of feedback, quoting the passage it refers to) → `grade_submission` (score in Canvas).
+
+One-time setup, done by the instructor **on their own machine** — the server never needs an interactive Google login:
+
+1. At [console.cloud.google.com](https://console.cloud.google.com): create a project, enable the **Google Drive API**, configure the OAuth consent screen (External; add yourself as a test user, and publish the app so refresh tokens don't expire after 7 days), and create an **OAuth client ID** of type **Desktop app**.
+2. Run `canvas-mcp-google-auth` and sign in when the browser opens. Use `--manual` if the terminal is on a different machine than the browser.
+3. Say yes to saving, or copy the printed `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and `GOOGLE_OAUTH_REFRESH_TOKEN` into the server's environment (Railway → Variables for remote deployments). Restart the server.
+
+Notes:
+
+- Comments post **as the connected Google account** — connect the instructor's account, not a bot.
+- The instructor's account needs at least Commenter access to each student doc (have students share their docs with the instructor, or use "Anyone with the link — Commenter").
+- The Drive API can't anchor comments to a text range, so `comment_on_google_doc` takes a `quoted_text` passage that appears in the comment card — that's how students see what each comment refers to.
+- The scope requested is full Drive access (`auth/drive`) — the narrower scopes can't comment on files the app didn't create. The token lives only in the server's environment.
 
 ## Setup
 
@@ -73,10 +91,12 @@ Or in a Claude Desktop / MCP client config:
 canvas_mcp_lite/
   server.py      FastMCP entry point; registers READ/WRITE/DELETE tool lists
   client.py      Async Canvas API client: auth, pagination, retry, errors
+  google_client.py  Google Drive API client (refresh-token auth, doc-ID parsing)
+  google_auth.py    One-time OAuth setup CLI (canvas-mcp-google-auth)
   util.py        Course code → ID resolution (cached), date formatting
   tools/         One module per domain: courses, assignments, grading,
                  modules_pages, announcements, discussions, files, quizzes,
-                 messaging, peer_review, analytics
+                 messaging, peer_review, analytics, integrity, google_docs
 ```
 
 ## Notes
