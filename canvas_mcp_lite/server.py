@@ -126,6 +126,7 @@ READ_TOOLS = [
     google_docs.google_docs_status,
     google_docs.list_google_doc_links,
     google_docs.read_google_doc,
+    google_docs.get_google_doc_forensics,
     google_docs.list_google_doc_comments,
     quizzes.list_quizzes,
     quizzes.get_quiz_details,

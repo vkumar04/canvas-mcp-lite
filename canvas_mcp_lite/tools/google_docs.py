@@ -170,6 +170,189 @@ async def list_google_doc_links(
     return "\n\n".join(parts)
 
 
+# --- Revision-history forensics (Draftback-style) ---------------------------
+
+SESSION_GAP_MS = 10 * 60 * 1000  # a >10-minute pause starts a new editing session
+LARGE_INSERT_CHARS = 100  # a single op this big usually means pasted text
+
+def _fmt_millis(ms: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _command_chars(cmd: dict) -> tuple[int, int, list[str]]:
+    """(chars_inserted, chars_deleted, large_insert_texts) for one changelog command."""
+    ty = cmd.get("ty")
+    if ty == "is":
+        text = cmd.get("s") or ""
+        return len(text), 0, [text] if len(text) >= LARGE_INSERT_CHARS else []
+    if ty == "ds":
+        return 0, cmd.get("ei", 0) - cmd.get("si", 0) + 1, []
+    if ty == "mlti":
+        ins = dele = 0
+        large: list[str] = []
+        for sub in cmd.get("mts") or []:
+            if isinstance(sub, dict):
+                i, d, l = _command_chars(sub)
+                ins, dele = ins + i, dele + d
+                large.extend(l)
+        return ins, dele, large
+    return 0, 0, []
+
+
+def _analyze_changelog(changelog: list) -> dict:
+    """Reduce a Docs changelog ([command, millis, user_id, ...] entries) to
+    session/paste/volume facts."""
+    events = []  # (millis, user_id, ins, dele, large_texts)
+    for entry in changelog:
+        if not (isinstance(entry, list) and entry and isinstance(entry[0], dict)):
+            continue
+        millis = entry[1] if len(entry) > 1 and isinstance(entry[1], (int, float)) else None
+        if millis is None:
+            continue
+        user = str(entry[2]) if len(entry) > 2 else ""
+        ins, dele, large = _command_chars(entry[0])
+        events.append((int(millis), user, ins, dele, large))
+
+    events.sort(key=lambda e: e[0])
+    sessions: list[dict] = []
+    large_inserts: list[tuple[int, str]] = []
+    total_ins = total_del = 0
+    for millis, user, ins, dele, large in events:
+        if not sessions or millis - sessions[-1]["end"] > SESSION_GAP_MS:
+            sessions.append({"start": millis, "end": millis, "ops": 0, "ins": 0, "del": 0})
+        s = sessions[-1]
+        s["end"] = millis
+        s["ops"] += 1
+        s["ins"] += ins
+        s["del"] += dele
+        total_ins += ins
+        total_del += dele
+        large_inserts.extend((millis, text) for text in large)
+
+    return {
+        "events": len(events),
+        "sessions": sessions,
+        "large_inserts": large_inserts,
+        "total_ins": total_ins,
+        "total_del": total_del,
+        "large_ins_chars": sum(len(t) for _, t in large_inserts),
+        "users": sorted({u for _, u, _, _, _ in events if u}),
+    }
+
+
+async def get_google_doc_forensics(doc_url: str) -> str:
+    """Draftback-style revision-history facts for a Google Doc submission: when
+    it was created and edited, how many distinct editing sessions, how much text
+    was typed in small edits vs. added in large single insertions (usually
+    pastes), and who edited. Reports observable metadata facts only — a large
+    paste may be the student's own drafting from another document, dictation, or
+    a quote, so interpretation belongs to the instructor. Requires the doc to be
+    shared with the connected instructor account (same access as read_google_doc)."""
+    try:
+        doc_id = extract_doc_id(doc_url)
+    except ValueError as exc:
+        return str(exc)
+
+    try:
+        meta = await google_request(
+            "GET", f"/files/{doc_id}", params={"fields": "name", "supportsAllDrives": "true"}
+        )
+        tiles_text = await google_request(
+            "GET",
+            f"https://docs.google.com/document/d/{doc_id}/revisions/tiles",
+            params={
+                "id": doc_id,
+                "start": 1,
+                "showDetailedRevisions": "false",
+                "filterNamed": "false",
+                "includes_info_params": "true",
+            },
+            raw=True,
+        )
+    except GoogleConfigError as exc:
+        return str(exc)
+    except GoogleAPIError as exc:
+        return await _explain_api_error(exc, doc_id)
+
+    import json as _json
+
+    tiles = _json.loads(tiles_text[4:]) if tiles_text.startswith(")]}'") else _json.loads(tiles_text)
+    tile_info = tiles.get("tileInfo") or []
+    user_map = {
+        uid: (info or {}).get("name", uid) for uid, info in (tiles.get("userMap") or {}).items()
+    }
+    if not tile_info:
+        return f"No revision history available for doc {doc_id}."
+    latest_rev = max(t.get("end", 0) for t in tile_info)
+
+    try:
+        load_text = await google_request(
+            "GET",
+            f"https://docs.google.com/document/d/{doc_id}/revisions/load",
+            params={"id": doc_id, "start": 1, "end": latest_rev},
+            raw=True,
+        )
+        payload = _json.loads(load_text[4:]) if load_text.startswith(")]}'") else _json.loads(load_text)
+        changelog = payload.get("changelog") or []
+    except (GoogleAPIError, ValueError):
+        # Detailed changelog unavailable — fall back to the coarse tile timeline.
+        lines = [f"Revision history for '{meta.get('name')}' (doc_id: {doc_id}) — coarse only:"]
+        for t in tile_info:
+            who = ", ".join(user_map.get(u, u) for u in t.get("users", []))
+            lines.append(
+                f"- revisions {t.get('start')}–{t.get('end')}, last change "
+                f"{_fmt_millis(t.get('endMillis', 0))} by {who}"
+            )
+        return "\n".join(lines)
+
+    stats = _analyze_changelog(changelog)
+    if not stats["events"]:
+        return f"Revision log for '{meta.get('name')}' contained no readable edit events."
+
+    sessions = stats["sessions"]
+    first, last = sessions[0]["start"], sessions[-1]["end"]
+    active_minutes = sum(max(1, round((s["end"] - s["start"]) / 60000)) for s in sessions)
+    editors = ", ".join(user_map.get(u, u) for u in stats["users"]) or "unknown"
+    typed = stats["total_ins"] - stats["large_ins_chars"]
+
+    lines = [
+        f"Revision history for '{meta.get('name')}' (doc_id: {doc_id})",
+        f"Editors: {editors}",
+        f"First edit: {_fmt_millis(first)} | Last edit: {_fmt_millis(last)}",
+        f"Edit operations: {stats['events']} across {len(sessions)} editing session(s) "
+        f"(~{active_minutes} min of active editing; a >10-min pause starts a new session)",
+        f"Characters: {stats['total_ins']:,} inserted "
+        f"({typed:,} in small edits, {stats['large_ins_chars']:,} in large insertions), "
+        f"{stats['total_del']:,} deleted",
+        "",
+        "Sessions:",
+    ]
+    for s in sessions:
+        minutes = max(1, round((s["end"] - s["start"]) / 60000))
+        lines.append(
+            f"- {_fmt_millis(s['start'])} → {_fmt_millis(s['end'])} ({minutes} min): "
+            f"{s['ops']} ops, +{s['ins']:,}/-{s['del']:,} chars"
+        )
+
+    large = sorted(stats["large_inserts"], key=lambda x: -len(x[1]))[:5]
+    if large:
+        lines.append("")
+        lines.append(
+            f"Largest single insertions (≥{LARGE_INSERT_CHARS} chars in one operation — "
+            "often a paste; may be the student's own drafting from elsewhere, or a quote):"
+        )
+        for millis, text in large:
+            snippet = " ".join(text.split())[:70]
+            lines.append(f"- {_fmt_millis(millis)}: {len(text):,} chars — \"{snippet}...\"")
+    else:
+        lines.append("")
+        lines.append(f"No single insertion reached {LARGE_INSERT_CHARS} chars — the text was typed incrementally.")
+
+    return "\n".join(lines)
+
+
 async def read_google_doc(doc_url: str) -> str:
     """Read the live text of a Google Doc the student submitted (get the URL from
     list_google_doc_links or get_submission_content, or pass a bare Drive file

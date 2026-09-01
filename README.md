@@ -4,11 +4,11 @@ A lean, instructor-focused [MCP](https://modelcontextprotocol.io) server for Can
 
 ## Tools
 
-71 tools across 12 domains, organized by risk level:
+72 tools across 12 domains, organized by risk level:
 
 | Group | Count | Examples |
 |---|---|---|
-| Read | 37 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `get_submission_forensics`, `read_google_doc` |
+| Read | 38 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `get_submission_forensics`, `read_google_doc` |
 | Write | 25 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `comment_on_google_doc`, `send_message`, `upload_course_file` |
 | Delete | 9 | `delete_assignment`, `delete_page`, `bulk_delete_announcements` |
 
@@ -38,6 +38,7 @@ Notes:
 - Comments post **as the connected Google account** — connect the instructor's account, not a bot.
 - The instructor's account needs at least Commenter access to each student doc (have students share their docs with the instructor, or use "Anyone with the link — Commenter").
 - The Drive API can't anchor comments to a text range, so `comment_on_google_doc` takes a `quoted_text` passage that appears in the comment card — that's how students see what each comment refers to.
+- `get_google_doc_forensics` reports Draftback-style revision-history facts for a shared doc — editing sessions, time span, text typed in small edits vs. added in large single insertions (often pastes), and who edited. Facts only, no AI-detection verdicts; it degrades to a coarse timeline if the detailed changelog is unavailable.
 - The scope requested is full Drive access (`auth/drive`) — the narrower scopes can't comment on files the app didn't create. The token lives only in the server's environment.
 
 ## Setup

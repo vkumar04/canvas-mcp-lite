@@ -146,6 +146,27 @@ def test_find_doc_links_ignores_non_doc_urls():
     ]
 
 
+def test_analyze_changelog_sessions_and_pastes():
+    minute = 60_000
+    t0 = 1_788_000_000_000
+    changelog = [
+        [{"ty": "is", "ibi": 1, "s": "Hello "}, t0, "u1"],
+        [{"ty": "is", "ibi": 7, "s": "world"}, t0 + minute, "u1"],
+        [{"ty": "ds", "si": 1, "ei": 5}, t0 + 2 * minute, "u1"],
+        # 30-minute gap -> new session; one large paste inside a mlti wrapper
+        [{"ty": "mlti", "mts": [{"ty": "is", "ibi": 1, "s": "x" * 250}]}, t0 + 32 * minute, "u1"],
+        ["not-a-valid-entry"],
+    ]
+    stats = google_docs._analyze_changelog(changelog)
+    assert stats["events"] == 4
+    assert len(stats["sessions"]) == 2
+    assert stats["total_ins"] == 11 + 250
+    assert stats["total_del"] == 5
+    assert stats["large_ins_chars"] == 250
+    assert len(stats["large_inserts"]) == 1
+    assert stats["users"] == ["u1"]
+
+
 def test_permission_error_names_connected_account(monkeypatch):
     async def fake_request(method, path, params=None, json_body=None, raw=False):
         raise google_client.GoogleAPIError(403, "insufficient permissions", "url")

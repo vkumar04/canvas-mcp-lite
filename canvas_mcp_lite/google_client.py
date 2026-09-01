@@ -114,16 +114,18 @@ async def google_request(
     json_body: Optional[dict[str, Any]] = None,
     raw: bool = False,
 ) -> Any:
-    """Single Drive API call (path is relative to the v3 base). Raises
+    """Single Google API call (path is relative to the Drive v3 base, or an
+    absolute https URL for non-Drive endpoints like docs.google.com). Raises
     GoogleAPIError on non-2xx; retries once on 401 with a fresh access token.
     raw=True returns response text (for file exports) instead of parsed JSON."""
+    url = path if path.startswith("https://") else GOOGLE_DRIVE_API + path
     response: Optional[httpx.Response] = None
     for attempt in range(2):
         token = await _get_access_token(force=attempt > 0)
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.request(
                 method,
-                GOOGLE_DRIVE_API + path,
+                url,
                 params=params,
                 json=json_body,
                 headers={"Authorization": f"Bearer {token}"},
