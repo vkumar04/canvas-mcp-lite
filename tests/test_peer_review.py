@@ -162,6 +162,79 @@ def test_summarize_reviewer_aggregates_across_assigned(monkeypatch):
     assert "On Cass Garcia's draft — 0 annotation(s)" in result
 
 
+def test_parse_pairs_both_formats():
+    assert peer_review._parse_pairs("[[1, 2], [3, 4]]") == [(1, 2), (3, 4)]
+    assert peer_review._parse_pairs('[{"reviewer": 1, "reviewee": 2}]') == [(1, 2)]
+
+
+def test_manual_assignment_gates_on_both_submitted(monkeypatch):
+    posted = []
+
+    async def fake_course_id(identifier):
+        return 264948
+
+    async def fake_paginated(path, params=None):
+        # Alice(1) and Bob(2) submitted; Cara(3) did NOT
+        return [
+            {"id": 11, "user_id": 1, "submitted_at": "2026-09-01T00:00:00Z", "user": {"name": "Alice"}},
+            {"id": 12, "user_id": 2, "submitted_at": "2026-09-01T00:00:00Z", "user": {"name": "Bob"}},
+            {"id": 13, "user_id": 3, "submitted_at": None, "user": {"name": "Cara"}},
+        ]
+
+    async def fake_request(method, path, params=None, json_body=None, data=None):
+        if method == "GET":
+            return {"peer_reviews": True}
+        posted.append((path, json_body["user_id"]))
+        return {"workflow_state": "assigned"}
+
+    async def fake_sub_id(course_id, assignment_id, user_id):
+        return {1: 11, 2: 12, 3: 13}[int(user_id)]
+
+    monkeypatch.setattr(peer_review, "get_course_id", fake_course_id)
+    monkeypatch.setattr(peer_review, "canvas_paginated", fake_paginated)
+    monkeypatch.setattr(peer_review, "canvas_request", fake_request)
+    monkeypatch.setattr(peer_review, "_submission_id_for_user", fake_sub_id)
+
+    # Alice↔Bob both submitted (ok); Cara→Alice (reviewer didn't submit);
+    # Bob→Cara (reviewee didn't submit); Alice→Alice (self)
+    pairs = "[[1,2],[2,1],[3,1],[2,3],[1,1]]"
+    result = asyncio.run(peer_review.assign_peer_reviews_manual(264948, 999, pairs))
+
+    assert "Assigned 2 of 5 requested pairs" in result
+    assert len(posted) == 2  # only Alice↔Bob
+    assert "Cara → Alice: reviewer didn't submit a draft (no credit for reviewing)" in result
+    assert "Bob → Cara: reviewee didn't submit a draft (nothing to review)" in result
+    assert "Alice → Alice: self-review, skipped" in result
+
+
+def test_manual_assignment_dry_run(monkeypatch):
+    async def fake_course_id(identifier):
+        return 264948
+
+    async def fake_paginated(path, params=None):
+        return [
+            {"id": 11, "user_id": 1, "submitted_at": "2026-09-01T00:00:00Z", "user": {"name": "Alice"}},
+            {"id": 12, "user_id": 2, "submitted_at": "2026-09-01T00:00:00Z", "user": {"name": "Bob"}},
+        ]
+
+    async def boom(*a, **k):
+        raise AssertionError("dry_run must not write")
+
+    monkeypatch.setattr(peer_review, "get_course_id", fake_course_id)
+    monkeypatch.setattr(peer_review, "canvas_paginated", fake_paginated)
+    monkeypatch.setattr(peer_review, "canvas_request", boom)
+    monkeypatch.setattr(peer_review, "_submission_id_for_user", boom)
+
+    result = asyncio.run(peer_review.assign_peer_reviews_manual(264948, 999, "[[1,2]]", dry_run=True))
+    assert "DRY RUN" in result
+    assert "Would assign 1 of 1 pairs" in result
+
+
+def test_manual_assignment_bad_json():
+    result = asyncio.run(peer_review.assign_peer_reviews_manual(264948, 999, "not json"))
+    assert "Couldn't parse pairs_json" in result
+
+
 def test_random_assignment_needs_two_submitters(monkeypatch):
     async def fake_course_id(identifier):
         return 264948

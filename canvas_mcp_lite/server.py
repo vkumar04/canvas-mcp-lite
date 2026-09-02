@@ -167,6 +167,7 @@ WRITE_TOOLS = [
     grading.hide_grades,
     messaging.send_message,
     peer_review.assign_peer_review,
+    peer_review.assign_peer_reviews_manual,
     peer_review.randomly_assign_peer_reviews,
     files.upload_course_file,
 ]

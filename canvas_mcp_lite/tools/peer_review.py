@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 from typing import Union
 
@@ -111,6 +112,129 @@ async def assign_peer_review(
         json_body={"user_id": reviewer_user_id},
     )
     return f"Assigned user {reviewer_user_id} to review user {reviewee_user_id}'s submission (workflow_state: {result.get('workflow_state')})."
+
+
+async def _enable_peer_reviews(course_id: int, assignment_id) -> str:
+    assignment = await canvas_request("GET", f"/courses/{course_id}/assignments/{assignment_id}")
+    if assignment.get("peer_reviews"):
+        return ""
+    await canvas_request(
+        "PUT",
+        f"/courses/{course_id}/assignments/{assignment_id}",
+        json_body={"assignment": {"peer_reviews": True}},
+    )
+    return "\n(Enabled peer_reviews on the assignment first.)"
+
+
+def _parse_pairs(pairs_json: str) -> list[tuple]:
+    """Accept '[[reviewer, reviewee], ...]' or
+    '[{"reviewer": r, "reviewee": re}, ...]' -> [(reviewer, reviewee), ...]."""
+    data = json.loads(pairs_json)
+    pairs = []
+    for item in data:
+        if isinstance(item, dict):
+            pairs.append((item["reviewer"], item["reviewee"]))
+        else:
+            pairs.append((item[0], item[1]))
+    return pairs
+
+
+async def assign_peer_reviews_manual(
+    course_identifier: Union[str, int],
+    assignment_id: Union[str, int],
+    pairs_json: str,
+    dry_run: bool = False,
+) -> str:
+    """Manually assign specific peer-review pairs (e.g. from groups students
+    formed), enforcing that BOTH people submitted their own draft. pairs_json is
+    a JSON array of [reviewer_user_id, reviewee_user_id] pairs (or objects with
+    "reviewer"/"reviewee" keys). A pair is SKIPPED if the reviewer didn't submit
+    (they don't get credit for reviewing when they didn't turn in their own
+    draft), if the reviewee didn't submit (nothing to review), or if it's a
+    self-review. Enables peer_reviews on the assignment if needed. Use
+    dry_run=True to preview which pairs would be assigned vs. skipped and why.
+    Get user_ids from list_submissions or list_users."""
+    course_id = await get_course_id(course_identifier)
+    try:
+        pairs = _parse_pairs(pairs_json)
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+        return (
+            f"Couldn't parse pairs_json: {exc}. Expected a JSON array like "
+            '[[reviewer_id, reviewee_id], ...] or [{"reviewer": id, "reviewee": id}, ...].'
+        )
+    if not pairs:
+        return "No pairs provided."
+
+    subs = await canvas_paginated(
+        f"/courses/{course_id}/assignments/{assignment_id}/submissions",
+        {"include[]": "user"},
+    )
+    all_names = {str(s["user_id"]): (s.get("user") or {}).get("name", f"user {s['user_id']}") for s in subs}
+    submitted_ids = {
+        str(s["user_id"]) for s in subs
+        if s.get("submitted_at") and s.get("id")
+        and (s.get("user") or {}).get("name") != "Test Student"
+    }
+
+    def name(uid):
+        return all_names.get(str(uid), f"user {uid}")
+
+    valid, skipped = [], []
+    seen = set()
+    for reviewer, reviewee in pairs:
+        rk, ek = str(reviewer), str(reviewee)
+        if rk == ek:
+            skipped.append(f"- {name(reviewer)} → {name(reviewee)}: self-review, skipped")
+            continue
+        if (rk, ek) in seen:
+            skipped.append(f"- {name(reviewer)} → {name(reviewee)}: duplicate pair, skipped")
+            continue
+        seen.add((rk, ek))
+        reasons = []
+        if rk not in submitted_ids:
+            reasons.append("reviewer didn't submit a draft (no credit for reviewing)")
+        if ek not in submitted_ids:
+            reasons.append("reviewee didn't submit a draft (nothing to review)")
+        if reasons:
+            skipped.append(f"- {name(reviewer)} → {name(reviewee)}: {'; '.join(reasons)}")
+        else:
+            valid.append((reviewer, reviewee))
+
+    valid_lines = [f"- {name(rv)} → reviews {name(re)}" for rv, re in valid]
+    skipped_block = ("\n\nSkipped (" + str(len(skipped)) + "):\n" + "\n".join(skipped)) if skipped else ""
+
+    if dry_run:
+        return (
+            f"DRY RUN — nothing assigned. Would assign {len(valid)} of {len(pairs)} pairs "
+            f"(both submitted):\n\n" + ("\n".join(valid_lines) or "(none)") + skipped_block
+        )
+    if not valid:
+        return f"No pairs to assign — all {len(pairs)} were skipped.{skipped_block}"
+
+    enabled_note = await _enable_peer_reviews(course_id, assignment_id)
+    submission_ids = {}
+    failures = []
+    for reviewer, reviewee in valid:
+        try:
+            sid = submission_ids.get(str(reviewee))
+            if sid is None:
+                sid = await _submission_id_for_user(course_id, assignment_id, reviewee)
+                submission_ids[str(reviewee)] = sid
+            await canvas_request(
+                "POST",
+                f"/courses/{course_id}/assignments/{assignment_id}/submissions/{sid}/peer_reviews",
+                json_body={"user_id": reviewer},
+            )
+        except (CanvasAPIError, RuntimeError) as exc:
+            failures.append(f"- {name(reviewer)} → {name(reviewee)}: {exc}")
+
+    result = (
+        f"Assigned {len(valid) - len(failures)} of {len(pairs)} requested pairs "
+        f"(both submitted their draft):{enabled_note}\n\n" + "\n".join(valid_lines) + skipped_block
+    )
+    if failures:
+        result += "\n\nFAILED to assign:\n" + "\n".join(failures)
+    return result
 
 
 async def randomly_assign_peer_reviews(
