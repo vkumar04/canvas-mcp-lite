@@ -4,12 +4,12 @@ A lean, instructor-focused [MCP](https://modelcontextprotocol.io) server for Can
 
 ## Tools
 
-72 tools across 12 domains, organized by risk level:
+73 tools across 12 domains, organized by risk level:
 
 | Group | Count | Examples |
 |---|---|---|
 | Read | 38 | `list_courses`, `list_ungraded_submissions`, `list_missing_submissions`, `get_submission_content`, `get_submission_forensics`, `read_google_doc` |
-| Write | 25 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `comment_on_google_doc`, `send_message`, `upload_course_file` |
+| Write | 26 | `create_assignment`, `grade_submission`, `grade_with_rubric`, `post_grades`, `comment_on_google_doc`, `randomly_assign_peer_reviews`, `upload_course_file` |
 | Delete | 9 | `delete_assignment`, `delete_page`, `bulk_delete_announcements` |
 
 Highlights:
@@ -18,6 +18,7 @@ Highlights:
 - **A real grading workflow** — `list_ungraded_submissions` is the grading queue, `grade_submission` handles points, pass/fail, letter, and percent grades (and reports partial success when Canvas saves a comment but rejects a grade), and `post_grades`/`hide_grades` control when students see results.
 - **Course codes or IDs** — every course-scoped tool accepts either a numeric course ID or a `course_code` string (resolved with a short-TTL cache).
 - **Safe by default** — assignments and pages are created unpublished unless you say otherwise; destructive tools are clearly marked.
+- **One-shot peer review setup** — `randomly_assign_peer_reviews` shuffles students who submitted into a review rotation (no self-reviews, everyone gives and receives equally), with a dry-run preview.
 - **LLM-friendly output** — every tool returns formatted, readable text rather than raw JSON.
 - **Grade Google Docs in place** — when students submit Google Doc links, `read_google_doc` reads the live document and `comment_on_google_doc` leaves feedback as real Google Docs comments from the instructor's account (see below).
 
