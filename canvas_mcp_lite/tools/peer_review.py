@@ -4,8 +4,45 @@ import asyncio
 import random
 from typing import Union
 
+from ..canvadocs import fetch_attachment_annotations, local_user_id
 from ..client import CanvasAPIError, canvas_paginated, canvas_request
-from ..util import get_course_id
+from ..util import format_date, get_course_id
+
+
+# DocViewer annotation types that carry reviewer commentary vs. pure markup.
+_ANNOTATION_LABELS = {
+    "highlight": "highlight",
+    "strikeout": "strikeout",
+    "freetext": "text box",
+    "point": "point comment",
+    "area": "area comment",
+    "commentReply": "reply",
+    "ink": "drawing",
+    "square": "box",
+}
+
+
+def _annotation_text(ann: dict) -> str:
+    """The reviewer's words on an annotation (its comment, plus any quoted text)."""
+    contents = (ann.get("contents") or "").strip()
+    quoted = (ann.get("text") or "").strip()
+    if contents and quoted:
+        return f'{contents}  [on: "{quoted[:80]}"]'
+    return contents or (f'(marked: "{quoted[:80]}")' if quoted else "")
+
+
+async def _submission_annotations(course_id: int, assignment_id, user_id) -> list[dict]:
+    """All DocViewer annotations across a student's submitted file(s)."""
+    sub = await canvas_request(
+        "GET", f"/courses/{course_id}/assignments/{assignment_id}/submissions/{user_id}"
+    )
+    out: list[dict] = []
+    for att in sub.get("attachments") or []:
+        anns = await fetch_attachment_annotations(att.get("preview_url", ""))
+        for a in anns:
+            a["_file"] = att.get("display_name", att.get("filename", "file"))
+        out.extend(anns)
+    return out
 
 
 def _rotation_pairs(user_ids: list, reviews_each: int) -> list[tuple]:
@@ -154,6 +191,112 @@ async def randomly_assign_peer_reviews(
     if failures:
         result += "\n\nFAILED (retry these individually with assign_peer_review):\n" + "\n".join(failures)
     return result
+
+
+async def get_submission_annotations(
+    course_identifier: Union[str, int],
+    assignment_id: Union[str, int],
+    user_id: Union[str, int],
+    reviewers_only: bool = True,
+) -> str:
+    """Show the DocViewer annotations left ON one student's submitted file —
+    the highlights, point/area comments, and margin notes peer reviewers add
+    directly on the document in Canvas (these do NOT appear in the normal
+    submission-comment thread). Grouped by annotator with their comment text.
+    reviewers_only=True (default) shows only student peer-reviewer annotations
+    and hides the instructor's own; set False to include everyone."""
+    course_id = await get_course_id(course_identifier)
+    annotations = await _submission_annotations(course_id, assignment_id, user_id)
+    if reviewers_only:
+        annotations = [a for a in annotations if a.get("user_role") == "student"]
+    if not annotations:
+        return (
+            "No DocViewer annotations found on this submission"
+            + (" from peer reviewers." if reviewers_only else ".")
+            + " (Reviewers may have used the comment box instead, left nothing yet, "
+            "or the submission isn't a DocViewer-rendered file.)"
+        )
+
+    by_author: dict = {}
+    for a in annotations:
+        key = (a.get("user_name", "?"), local_user_id(a.get("user_id")))
+        by_author.setdefault(key, []).append(a)
+
+    blocks = []
+    for (name, uid), anns in sorted(by_author.items(), key=lambda kv: -len(kv[1])):
+        counts: dict = {}
+        for a in anns:
+            label = _ANNOTATION_LABELS.get(a.get("type"), a.get("type", "annotation"))
+            counts[label] = counts.get(label, 0) + 1
+        breakdown = ", ".join(f"{n} {lbl}{'s' if n > 1 else ''}" for lbl, n in counts.items())
+        lines = [f"{name} (user_id={uid}) — {len(anns)} annotation(s): {breakdown}"]
+        for a in sorted(anns, key=lambda x: (x.get("page", 0), x.get("created_at", ""))):
+            text = _annotation_text(a)
+            if text:
+                lines.append(f"  p{(a.get('page', 0) + 1)}: {text}")
+        blocks.append("\n".join(lines))
+
+    return (
+        f"DocViewer annotations on submission (assignment {assignment_id}, user {user_id}):\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+async def summarize_reviewer_annotations(
+    course_identifier: Union[str, int],
+    assignment_id: Union[str, int],
+    reviewer_user_id: Union[str, int],
+) -> str:
+    """Grade-the-reviewer view: gather everything ONE student did as a peer
+    reviewer on an assignment — the DocViewer annotations they left across every
+    submission they were assigned to review — so you can assess the quality and
+    quantity of their peer feedback. Pairs with grade_submission on the peer-
+    review gradebook column. (Reviews left only in the comment box aren't
+    DocViewer annotations; use list_submissions/get_submission_content for those.)"""
+    course_id = await get_course_id(course_identifier)
+    reviewer_local = local_user_id(reviewer_user_id) or int(reviewer_user_id)
+
+    reviews = await canvas_paginated(
+        f"/courses/{course_id}/assignments/{assignment_id}/peer_reviews",
+        {"include[]": "user"},
+    )
+    assigned = [r for r in reviews if str(r.get("assessor_id")) == str(reviewer_user_id)]
+    if not assigned:
+        return (
+            f"No peer reviews are assigned to reviewer user_id={reviewer_user_id} on "
+            f"assignment {assignment_id}. (Check list_peer_reviews.)"
+        )
+
+    sections = []
+    total_annotations = 0
+    total_with_text = 0
+    completed = 0
+    for r in assigned:
+        reviewee = r.get("user", {}) or {}
+        reviewee_name = reviewee.get("display_name", reviewee.get("name", f"user {r.get('user_id')}"))
+        anns = await _submission_annotations(course_id, assignment_id, r.get("user_id"))
+        mine = [a for a in anns if local_user_id(a.get("user_id")) == reviewer_local]
+        with_text = [a for a in mine if _annotation_text(a)]
+        total_annotations += len(mine)
+        total_with_text += len(with_text)
+        if mine:
+            completed += 1
+        state = r.get("workflow_state", "?")
+        header = (
+            f"On {reviewee_name}'s draft — {len(mine)} annotation(s), "
+            f"{len(with_text)} with comments [Canvas state: {state}]"
+        )
+        lines = [header]
+        for a in sorted(with_text, key=lambda x: (x.get("page", 0), x.get("created_at", ""))):
+            lines.append(f"  p{(a.get('page', 0) + 1)}: {_annotation_text(a)}")
+        sections.append("\n".join(lines))
+
+    summary = (
+        f"Peer-review work by user_id={reviewer_user_id} on assignment {assignment_id}:\n"
+        f"Assigned {len(assigned)} review(s); left annotations on {completed}. "
+        f"Total: {total_annotations} annotation(s), {total_with_text} carrying written feedback.\n\n"
+    )
+    return summary + "\n\n".join(sections)
 
 
 async def delete_peer_review(

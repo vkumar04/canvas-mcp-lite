@@ -136,6 +136,8 @@ READ_TOOLS = [
     messaging.list_conversations,
     messaging.get_conversation_details,
     peer_review.list_peer_reviews,
+    peer_review.get_submission_annotations,
+    peer_review.summarize_reviewer_annotations,
     analytics.get_assignment_analytics,
     analytics.get_student_analytics,
 ]
