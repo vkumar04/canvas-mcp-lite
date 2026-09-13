@@ -56,6 +56,8 @@ def test_comment_posts_with_quote(monkeypatch):
     calls = {}
 
     async def fake_request(method, path, params=None, json_body=None, raw=False):
+        if method == "GET":  # doc lookup for anchoring; quote isn't in this doc
+            return _document("Unrelated wording.\n")
         calls["method"] = method
         calls["path"] = path
         calls["body"] = json_body
@@ -74,6 +76,213 @@ def test_comment_posts_with_quote(monkeypatch):
     assert calls["body"]["quotedFileContent"]["value"] == "I have always been a writer."
     assert "Posted comment c1" in result
     assert "Hayley" in result
+
+
+def _document(*paragraphs):
+    """Minimal documents.get body: paragraphs laid out from index 1, the way
+    Docs numbers a real document."""
+    content = [{"startIndex": 0, "endIndex": 1, "sectionBreak": {}}]
+    index = 1
+    for text in paragraphs:
+        length = len(text.encode("utf-16-le")) // 2
+        content.append(
+            {
+                "startIndex": index,
+                "endIndex": index + length,
+                "paragraph": {
+                    "elements": [
+                        {
+                            "startIndex": index,
+                            "endIndex": index + length,
+                            "textRun": {"content": text},
+                        }
+                    ]
+                },
+            }
+        )
+        index += length
+    return {"body": {"content": content}}
+
+
+def test_locate_range_maps_to_doc_indices():
+    doc = _document("The thesis is weak.\n", "But the evidence is strong.\n")
+    assert google_docs._locate_range(doc, "thesis") == (5, 11)
+    # Second paragraph starts at 1 + len("The thesis is weak.\n") == 21
+    assert google_docs._locate_range(doc, "evidence") == (29, 37)
+
+
+def test_locate_range_tolerates_whitespace_and_missing_text():
+    doc = _document("A claim that\nspans a line break.\n")
+    assert google_docs._locate_range(doc, "claim   that spans") == (3, 19)
+    assert google_docs._locate_range(doc, "nowhere in the doc") is None
+
+
+def test_locate_range_counts_utf16_units_and_occurrences():
+    # The emoji is one Python char but two Docs indices, so text after it shifts.
+    doc = _document("Nice 😄 work. Nice work.\n")
+    assert google_docs._locate_range(doc, "work", occurrence=1) == (9, 13)
+    assert google_docs._locate_range(doc, "work", occurrence=2) == (20, 24)
+    assert google_docs._locate_range(doc, "work", occurrence=3) is None
+
+
+def test_locate_range_folds_smart_punctuation_and_case():
+    # Docs auto-converts quotes/dashes as students type; the LLM quotes ASCII.
+    doc = _document("The author\u2019s \u201cbold\u201d claim \u2014 stated twice.\n")
+    assert google_docs._locate_range(doc, "the author's \"bold\" claim - stated") == (1, 35)
+    # Folding must not shift indices for text after an ellipsis (1 char -> 3).
+    doc = _document("First\u2026 then second.\n")
+    assert google_docs._locate_range(doc, "then second") == (8, 19)
+    assert google_docs._locate_range(doc, "First... then") == (1, 12)
+
+
+def test_locate_range_end_stops_before_inline_object():
+    # "word" [image] "next": the image occupies index 5; the quote must end at 5.
+    doc = {
+        "body": {
+            "content": [
+                {
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 1, "endIndex": 5, "textRun": {"content": "word"}},
+                            {"startIndex": 5, "endIndex": 6, "inlineObjectElement": {"inlineObjectId": "i"}},
+                            {"startIndex": 6, "endIndex": 11, "textRun": {"content": "next\n"}},
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+    assert google_docs._locate_range(doc, "word") == (1, 5)
+    assert google_docs._locate_range(doc, "next") == (6, 10)
+
+
+def test_locate_range_reads_table_cells():
+    doc = {
+        "body": {
+            "content": [
+                {
+                    "table": {
+                        "tableRows": [
+                            {
+                                "tableCells": [
+                                    {
+                                        "content": [
+                                            {
+                                                "paragraph": {
+                                                    "elements": [
+                                                        {
+                                                            "startIndex": 40,
+                                                            "endIndex": 52,
+                                                            "textRun": {"content": "cell wording"},
+                                                        }
+                                                    ]
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+    assert google_docs._locate_range(doc, "wording") == (45, 52)
+
+
+def test_comment_anchors_via_docs_api(monkeypatch):
+    calls = []
+
+    async def fake_request(method, path, params=None, json_body=None, raw=False):
+        calls.append((method, path, json_body))
+        if method == "GET":
+            return _document("The thesis is weak.\n")
+        return {}
+
+    monkeypatch.setattr(google_docs, "google_request", fake_request)
+    result = asyncio.run(
+        google_docs.comment_on_google_doc(DOC_ID, "Sharpen this.", quoted_text="thesis")
+    )
+
+    assert calls[-1][1].endswith(f"/documents/{DOC_ID}:batchUpdate")
+    assert calls[-1][2]["requests"][0]["insertComment"] == {
+        "content": "Sharpen this.",
+        "range": {"startIndex": 5, "endIndex": 11},
+    }
+    assert "anchored comment" in result
+    # Never fall through to an unanchored Drive comment once anchoring worked.
+    assert not any(path.endswith("/comments") for _, path, _ in calls)
+
+
+def test_comment_falls_back_when_preview_access_missing(monkeypatch):
+    async def fake_request(method, path, params=None, json_body=None, raw=False):
+        if method == "GET":
+            return _document("The thesis is weak.\n")
+        if "batchUpdate" in path:
+            raise google_client.GoogleAPIError(403, "preview only", path)
+        return {"id": "c9", "content": json_body["content"], "author": {"displayName": "Hayley"}}
+
+    monkeypatch.setattr(google_docs, "google_request", fake_request)
+    result = asyncio.run(
+        google_docs.comment_on_google_doc(DOC_ID, "Sharpen this.", quoted_text="thesis")
+    )
+    assert "Posted comment c9" in result
+    assert "preview access" in result
+    assert "Not anchored" in result
+
+
+def test_comment_falls_back_when_docs_reports_comment_not_saved(monkeypatch):
+    """batchUpdate can return 200 with commentUpdateState=ALL_FAILED_UNKNOWN_REASON."""
+    posted = {}
+
+    async def fake_request(method, path, params=None, json_body=None, raw=False):
+        if method == "GET":
+            return _document("The thesis is weak.\n")
+        if "batchUpdate" in path:
+            return {"documentId": DOC_ID, "commentUpdateState": "ALL_FAILED_UNKNOWN_REASON"}
+        posted["body"] = json_body
+        return {"id": "c8", "content": json_body["content"], "author": {"displayName": "Hayley"}}
+
+    monkeypatch.setattr(google_docs, "google_request", fake_request)
+    result = asyncio.run(
+        google_docs.comment_on_google_doc(DOC_ID, "Sharpen this.", quoted_text="thesis")
+    )
+    assert posted["body"]["quotedFileContent"]["value"] == "thesis"
+    assert "failed to save the comment thread" in result
+
+
+def test_comment_falls_back_when_quote_absent(monkeypatch):
+    posted = {}
+
+    async def fake_request(method, path, params=None, json_body=None, raw=False):
+        if method == "GET":
+            return _document("Something else entirely.\n")
+        posted["body"] = json_body
+        return {"id": "c7", "content": json_body["content"], "author": {"displayName": "Hayley"}}
+
+    monkeypatch.setattr(google_docs, "google_request", fake_request)
+    result = asyncio.run(
+        google_docs.comment_on_google_doc(DOC_ID, "Sharpen this.", quoted_text="the thesis")
+    )
+    # The quote still reaches the student in the comment card.
+    assert posted["body"]["quotedFileContent"]["value"] == "the thesis"
+    assert "isn't in the document" in result
+
+
+def test_anchor_field_is_never_sent_to_drive(monkeypatch):
+    """A Drive `anchor` renders as 'Original content deleted' in Docs."""
+    seen = {}
+
+    async def fake_request(method, path, params=None, json_body=None, raw=False):
+        if method == "GET":
+            raise google_client.GoogleAPIError(404, "no preview", path)
+        seen["body"] = json_body
+        return {"id": "c2", "content": json_body["content"], "author": {"displayName": "Hayley"}}
+
+    monkeypatch.setattr(google_docs, "google_request", fake_request)
+    asyncio.run(google_docs.comment_on_google_doc(DOC_ID, "Note.", quoted_text="anything"))
+    assert "anchor" not in seen["body"]
 
 
 def test_empty_comment_not_posted():

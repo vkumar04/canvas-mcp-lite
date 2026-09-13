@@ -3,13 +3,14 @@ feedback as real Google Docs comments from the instructor's account."""
 
 from __future__ import annotations
 
+import bisect
+import os
 import re
 from typing import Union
 
-import os
-
 from ..client import canvas_paginated
 from ..google_client import (
+    GOOGLE_DOCS_API,
     GoogleAPIError,
     GoogleConfigError,
     connected_account_email,
@@ -435,14 +436,161 @@ async def list_google_doc_comments(doc_url: str) -> str:
     return f"Comments on Google Doc {doc_id}:\n\n" + "\n\n".join(blocks) + note
 
 
-async def comment_on_google_doc(doc_url: str, comment: str, quoted_text: str = "") -> str:
+# --- Anchored comments -------------------------------------------------------
+#
+# Two APIs, deliberately: the Docs API `insertComment` pins a comment to a text
+# range (the margin card points at highlighted text, like a human comment), but
+# it is Developer Preview only. Drive's comments.create always works but always
+# renders unanchored. Note that Drive's documented `anchor` field is NOT a third
+# option: Workspace editors ignore it, and a malformed one makes Docs display
+# the comment as "Original content deleted" — so we never send it.
+
+
+def _utf16_len(text: str) -> int:
+    """Length in UTF-16 code units — the unit Docs API indices are measured in
+    (an emoji is one Python character but two Docs indices)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _iter_text_runs(content) -> list[tuple[int, str]]:
+    """(doc_start_index, text) for every text run in a body/cell content list,
+    in document order. Tables and TOCs nest their own content lists."""
+    runs: list[tuple[int, str]] = []
+    for element in content or []:
+        paragraph = element.get("paragraph")
+        if paragraph:
+            for item in paragraph.get("elements") or []:
+                run = item.get("textRun")
+                if run and item.get("startIndex") is not None:
+                    runs.append((item["startIndex"], run.get("content", "")))
+        table = element.get("table")
+        if table:
+            for row in table.get("tableRows") or []:
+                for cell in row.get("tableCells") or []:
+                    runs.extend(_iter_text_runs(cell.get("content")))
+        toc = element.get("tableOfContents")
+        if toc:
+            runs.extend(_iter_text_runs(toc.get("content")))
+    return runs
+
+
+# Docs auto-substitutes typographic punctuation as students type; the LLM quoting
+# an export usually writes the ASCII form. Fold both sides to ASCII so they match.
+_PUNCTUATION_FOLD = str.maketrans(
+    {
+        "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",  # single quotes
+        "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',  # double quotes
+        "\u2032": "'", "\u2033": '"',  # primes
+        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",  # dashes
+        "\u2026": "...",  # ellipsis
+    }
+)
+
+
+def _normalize(text: str) -> tuple[str, list[int]]:
+    """Collapse whitespace runs to single spaces, fold typographic quotes and
+    dashes to ASCII, and lowercase — keeping a map from each normalized position
+    back to its original one. Quotes come from an LLM reading an export, so
+    line wrapping, smart quotes, and capitalization rarely match the doc exactly."""
+    chars: list[str] = []
+    index_map: list[int] = []
+    prev_space = False
+    for i, ch in enumerate(text):
+        if ch.isspace():
+            if prev_space:
+                continue
+            chars.append(" ")
+            prev_space = True
+            index_map.append(i)
+        else:
+            folded = ch.translate(_PUNCTUATION_FOLD).lower()
+            for out in folded:
+                chars.append(out)
+                index_map.append(i)
+            prev_space = False
+    return "".join(chars), index_map
+
+
+def _locate_range(document: dict, quoted_text: str, occurrence: int = 1):
+    """Docs API (startIndex, endIndex) for the Nth occurrence of quoted_text, or
+    None when it isn't in the document body."""
+    runs = _iter_text_runs((document.get("body") or {}).get("content"))
+    if not runs:
+        return None
+
+    flat = "".join(text for _, text in runs)
+    run_offsets: list[int] = []
+    position = 0
+    for _, text in runs:
+        run_offsets.append(position)
+        position += len(text)
+
+    norm_flat, norm_map = _normalize(flat)
+    norm_quote, _ = _normalize(quoted_text)
+    norm_quote = norm_quote.strip()
+    if not norm_quote:
+        return None
+
+    found = -1
+    for _ in range(max(1, occurrence)):
+        found = norm_flat.find(norm_quote, found + 1)
+        if found == -1:
+            return None
+
+    flat_start = norm_map[found]
+    flat_last = norm_map[found + len(norm_quote) - 1]
+
+    def to_doc_index(flat_pos: int, *, after: bool = False) -> int:
+        """Docs index of the character at flat_pos, or (after=True) the index
+        just past it. The end is computed from the run holding the last matched
+        character, not the next run: runs aren't contiguous across inline
+        objects, footnote refs, or table cells, so "next run start" can overshoot."""
+        i = min(max(bisect.bisect_right(run_offsets, flat_pos) - 1, 0), len(runs) - 1)
+        doc_start, text = runs[i]
+        local = flat_pos - run_offsets[i] + (1 if after else 0)
+        return doc_start + _utf16_len(text[:local])
+
+    return to_doc_index(flat_start), to_doc_index(flat_last, after=True)
+
+
+async def _post_anchored_comment(doc_id: str, comment: str, start: int, end: int) -> None:
+    """Pin a comment to a text range via the Docs API. Raises GoogleAPIError if
+    the account lacks Developer Preview access, or if Docs accepted the batch but
+    reports the comment itself didn't save (commentUpdateState)."""
+    response = await google_request(
+        "POST",
+        f"{GOOGLE_DOCS_API}/documents/{doc_id}:batchUpdate",
+        json_body={
+            "requests": [
+                {
+                    "insertComment": {
+                        "content": comment,
+                        "range": {"startIndex": start, "endIndex": end},
+                    }
+                }
+            ]
+        },
+    )
+    # Docs can return 200 yet fail to persist the comment thread; the docs say
+    # to check commentUpdateState rather than trust the status code.
+    state = (response or {}).get("commentUpdateState")
+    if state and state != "ALL_SAVED":
+        raise GoogleAPIError(200, f"commentUpdateState={state}", f"{GOOGLE_DOCS_API}/documents/{doc_id}:batchUpdate")
+
+
+async def comment_on_google_doc(
+    doc_url: str, comment: str, quoted_text: str = "", occurrence: int = 1
+) -> str:
     """Leave one feedback comment on a student's Google Doc, posted from the
     connected instructor Google account. Pass the exact passage the feedback is
-    about as quoted_text — it's shown in the comment card so the student sees
-    what the comment refers to (the Drive API can't highlight/anchor text in the
-    doc itself, so the quote is the anchor). Make one call per piece of feedback;
-    leave quoted_text empty only for whole-document comments. Grades still go
-    through grade_submission in Canvas — this posts feedback only."""
+    about as quoted_text: the comment is then pinned to that text in the doc, so
+    the student sees it highlighted with the note in the margin. If that passage
+    appears more than once, set occurrence to pick which one (2 = second match).
+    Anchoring needs Docs API preview access on the connected account; without it
+    the comment still posts, just unanchored with the quote shown in the card —
+    the reply says which happened. Make one call per piece of feedback; leave
+    quoted_text empty only for whole-document comments. Grades still go through
+    grade_submission in Canvas — this posts feedback only."""
     try:
         doc_id = extract_doc_id(doc_url)
     except ValueError as exc:
@@ -450,9 +598,49 @@ async def comment_on_google_doc(doc_url: str, comment: str, quoted_text: str = "
     if not comment.strip():
         return "Comment text is empty — nothing posted."
 
+    quote = quoted_text.strip()
+    fallback_reason = ""
+
+    if quote:
+        try:
+            document = await google_request(
+                "GET",
+                f"{GOOGLE_DOCS_API}/documents/{doc_id}",
+                params={"fields": "body"},
+            )
+            text_range = _locate_range(document, quote, occurrence)
+        except GoogleConfigError as exc:
+            return str(exc)
+        except GoogleAPIError as exc:
+            document, text_range = None, None
+            fallback_reason = f"couldn't read the doc structure to anchor it (HTTP {exc.status_code})"
+
+        if document is not None and text_range is None:
+            fallback_reason = (
+                f"that exact text isn't in the document"
+                if occurrence <= 1
+                else f"the document has fewer than {occurrence} occurrences of that text"
+            )
+        elif text_range:
+            try:
+                await _post_anchored_comment(doc_id, comment, *text_range)
+                return (
+                    f"Posted anchored comment on doc {doc_id}, pinned to "
+                    f'"{quote}":\n{comment}'
+                )
+            except GoogleConfigError as exc:
+                return str(exc)
+            except GoogleAPIError as exc:
+                if exc.status_code in (403, 404):
+                    fallback_reason = "the connected account doesn't have Docs API preview access"
+                elif "commentUpdateState" in str(exc):
+                    fallback_reason = "Docs accepted the request but failed to save the comment thread"
+                else:
+                    fallback_reason = f"the Docs API rejected the anchored comment (HTTP {exc.status_code})"
+
     body: dict = {"content": comment}
-    if quoted_text.strip():
-        body["quotedFileContent"] = {"mimeType": "text/plain", "value": quoted_text.strip()}
+    if quote:
+        body["quotedFileContent"] = {"mimeType": "text/plain", "value": quote}
 
     try:
         created = await google_request(
@@ -467,8 +655,9 @@ async def comment_on_google_doc(doc_url: str, comment: str, quoted_text: str = "
         return await _explain_api_error(exc, doc_id)
 
     author = (created.get("author") or {}).get("displayName", "the connected account")
-    quote_note = f'\nre: "{quoted_text.strip()}"' if quoted_text.strip() else ""
+    quote_note = f'\nre: "{quote}"' if quote else ""
+    anchor_note = f"\n(Not anchored to the text — {fallback_reason}.)" if fallback_reason else ""
     return (
         f"Posted comment {created.get('id')} on doc {doc_id} as {author}:"
-        f"\n{created.get('content', comment)}{quote_note}"
+        f"\n{created.get('content', comment)}{quote_note}{anchor_note}"
     )

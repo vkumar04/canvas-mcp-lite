@@ -24,6 +24,9 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_DRIVE_API = "https://www.googleapis.com/drive/v3"
+# Anchored comments live on the Docs API, not Drive. The drive scope already
+# authorizes it, so connected accounts don't need to re-consent.
+GOOGLE_DOCS_API = "https://docs.googleapis.com/v1"
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 SETUP_MESSAGE = (
