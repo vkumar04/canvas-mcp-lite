@@ -23,6 +23,7 @@ from .tools import (
     integrity,
     messaging,
     modules_pages,
+    new_quizzes,
     peer_review,
     quizzes,
 )
@@ -131,6 +132,8 @@ READ_TOOLS = [
     quizzes.list_quizzes,
     quizzes.get_quiz_details,
     quizzes.list_quiz_submissions,
+    new_quizzes.list_new_quizzes,
+    new_quizzes.get_new_quiz_item_analysis,
     grading.list_rubrics,
     grading.get_rubric,
     messaging.list_conversations,

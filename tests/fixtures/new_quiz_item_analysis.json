@@ -1,0 +1,192 @@
+[
+ {
+  "metadata": {
+   "interaction_type": "true-false",
+   "item_body": "<p>A rectangle with four equal sides is a square.&nbsp;</p>",
+   "item_id": 898035,
+   "item_title": null
+  },
+  "scores": {
+   "points_possible": 20.0,
+   "mean": 8.18,
+   "difficulty_index": 0.41,
+   "median": 0,
+   "discrimination_index": 0.4,
+   "pearson_correlation": -0.14
+  },
+  "attempts": {
+   "students_responded": null,
+   "students_without_response": null
+  },
+  "answer_summary": {
+   "choices": [
+    {
+     "body": "True",
+     "count": 9,
+     "correct": true,
+     "percentage": 41
+    },
+    {
+     "body": "False",
+     "count": 13,
+     "correct": false,
+     "percentage": 59
+    }
+   ],
+   "aggregate": {
+    "correct": {
+     "count": 9,
+     "percentage": 41
+    },
+    "incorrect": {
+     "count": 13,
+     "percentage": 59
+    }
+   },
+   "no_answer": {
+    "count": 0,
+    "percentage": 0
+   }
+  }
+ },
+ {
+  "metadata": {
+   "interaction_type": "choice",
+   "item_body": "<p>Which planet is closest to the sun?</p>",
+   "item_id": 898033,
+   "item_title": null
+  },
+  "scores": {
+   "points_possible": 20.0,
+   "mean": 15.45,
+   "difficulty_index": 0.77,
+   "median": 20,
+   "discrimination_index": 0.44,
+   "pearson_correlation": 0.09
+  },
+  "attempts": {
+   "students_responded": null,
+   "students_without_response": null
+  },
+  "answer_summary": {
+   "choices": [
+    {
+     "body": "<p>Mercury is the closest planet to the sun.&nbsp;</p>",
+     "count": 17,
+     "correct": true,
+     "percentage": 77
+    },
+    {
+     "body": "<p>Venus</p>",
+     "count": 1,
+     "correct": false,
+     "percentage": 5
+    },
+    {
+     "body": "<p>Mars</p>",
+     "count": 4,
+     "correct": false,
+     "percentage": 18
+    }
+   ],
+   "aggregate": {
+    "correct": {
+     "count": 17,
+     "percentage": 77
+    },
+    "incorrect": {
+     "count": 5,
+     "percentage": 23
+    }
+   },
+   "no_answer": {
+    "count": 0,
+    "percentage": 0
+   }
+  }
+ },
+ {
+  "metadata": {
+   "interaction_type": "matching",
+   "item_body": "<p>Match each term with its definition.</p>",
+   "item_id": 898034,
+   "item_title": null
+  },
+  "scores": {
+   "points_possible": 20.0,
+   "mean": 5.45,
+   "difficulty_index": 0.27,
+   "median": 0,
+   "discrimination_index": 0.63,
+   "pearson_correlation": 0.22
+  },
+  "attempts": {
+   "students_responded": null,
+   "students_without_response": null
+  },
+  "answer_summary": {
+   "aggregate": {
+    "correct": {
+     "count": 6,
+     "percentage": 27
+    },
+    "incorrect": {
+     "count": 16,
+     "percentage": 73
+    }
+   },
+   "no_answer": {
+    "count": 0,
+    "percentage": 0
+   },
+   "questions": {
+    "13575": {
+     "body": "Triangle",
+     "answers": {
+      "QSBjbG9zZWQgc2hhcGUgd2l0aCB0aHJlZSBzaWRlcy4=\n": {
+       "body": "A closed shape with three sides.",
+       "count": 14,
+       "correct": true,
+       "distractor": false
+      },
+      "QSBjbG9zZWQgc2hhcGUgd2l0aCBmb3VyIGVxdWFsIHNpZGVzLg==\n": {
+       "body": "A closed shape with four equal sides.",
+       "count": 1,
+       "correct": false,
+       "distractor": false
+      },
+      "VGhlIGRpc3RhbmNlIGFyb3VuZCBhIHNoYXBlLg==\n": {
+       "body": "The distance around a shape.",
+       "count": 7,
+       "correct": false,
+       "distractor": false
+      }
+     }
+    },
+    "41936": {
+     "body": "Perimeter",
+     "answers": {
+      "QSBjbG9zZWQgc2hhcGUgd2l0aCB0aHJlZSBzaWRlcy4=\n": {
+       "body": "A closed shape with three sides.",
+       "count": 0,
+       "correct": false,
+       "distractor": false
+      },
+      "QSBjbG9zZWQgc2hhcGUgd2l0aCBmb3VyIGVxdWFsIHNpZGVzLg==\n": {
+       "body": "A closed shape with four equal sides.",
+       "count": 0,
+       "correct": false,
+       "distractor": false
+      },
+      "VGhlIGRpc3RhbmNlIGFyb3VuZCBhIHNoYXBlLg==\n": {
+       "body": "The distance around a shape.",
+       "count": 22,
+       "correct": true,
+       "distractor": false
+      }
+     }
+    }
+   }
+  }
+ }
+]
