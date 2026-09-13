@@ -88,6 +88,14 @@ async def get_submission_content(
         f"submitted_at={format_date(sub.get('submitted_at'))} | "
         f"attempt={sub.get('attempt')}\n"
     )
+    attempts = [h for h in (sub.get("submission_history") or []) if h.get("submitted_at")]
+    if len(attempts) > 1 or (sub.get("attempt") or 0) > 1:
+        stamps = ", ".join(format_date(h.get("submitted_at")) for h in attempts) or "timestamps unavailable"
+        header += (
+            f"NOTE: this student has submitted {sub.get('attempt') or len(attempts)} times "
+            f"({stamps}). The content below is the MOST RECENT submission; earlier attempts "
+            f"are superseded.\n"
+        )
 
     comments = sub.get("submission_comments", []) or []
     comments_block = ""
@@ -155,6 +163,7 @@ async def list_ungraded_submissions(course_identifier: Union[str, int]) -> str:
             f"- {(s.get('user') or {}).get('name', 'Unknown')} (user_id={s.get('user_id')}), "
             f"submitted {format_date(s.get('submitted_at'))}"
             f"{' [LATE]' if s.get('late') else ''}"
+            f"{' [RESUBMITTED: attempt ' + str(s.get('attempt')) + ']' if (s.get('attempt') or 0) > 1 else ''}"
             for s in ungraded
         ]
         sections.append(

@@ -1,6 +1,6 @@
 # canvas-mcp-lite
 
-Lean, instructor-focused Canvas LMS MCP server built on FastMCP. ~1,500 lines, flat layout, no test suite.
+Lean, instructor-focused Canvas LMS MCP server built on FastMCP. Flat layout; unit tests in `tests/` (`.venv/bin/python -m pytest -q`, no network — Google/Canvas calls are monkeypatched).
 
 ## Architecture
 
@@ -11,7 +11,7 @@ All source lives in the `canvas_mcp_lite/` package directory:
 - `util.py` — `get_course_id` resolves a numeric ID or `course_code` string (5-minute TTL cache; do not make it permanent — stale code→ID mappings were a real bug), `format_date`, `announcement_posting_status`.
 - `google_client.py` — Google Drive API client for grading Google Docs submissions in place. Auth is a long-lived OAuth **refresh token**: from the env (`GOOGLE_OAUTH_REFRESH_TOKEN`), or a runtime override set by the in-chat connect flow (runtime wins). Tools return the setup message (not an exception) when unconfigured.
 - `google_oauth_flow.py` — in-chat account connection for HTTP deployments: the `connect_google_docs` tool mints a single-use state and returns a sign-in link; the public `/oauth/google/callback` route (registered in server.py) exchanges the code, activates the token in-process, and shows it for persisting to the env. States are the security gate — only the tool (behind the secret `MCP_PATH`) can mint one; keep it that way. Requires a **Web application** OAuth client. `google_auth.py` (`canvas-mcp-google-auth`) is the terminal flow for local stdio servers (Desktop-app OAuth client).
-- `tools/` — one module per domain: courses, modules_pages, assignments, announcements, discussions, files, quizzes, grading, messaging, peer_review, analytics, integrity, google_docs. `google_docs.comment_on_google_doc` posts real Google Docs comments as the connected account; the Drive API can't anchor comments to a range, so `quoted_text` (shown in the comment card) is the anchor — keep that contract.
+- `tools/` — one module per domain: courses, modules_pages, assignments, announcements, discussions, files, quizzes, grading, messaging, peer_review, analytics, integrity, google_docs, new_quizzes. `new_quizzes` calls `/api/quiz/v1` at the site root (absolute URL through `canvas_request`); its item-analysis report is generated asynchronously (POST reports → poll `/progress/:id` → download the signed `results.url` without the Canvas token). Grading tools look up the submission's `attempt` first and pin comments to it (`comment[attempt]`), so a resubmitting student sees feedback on the latest attempt only. `google_docs.comment_on_google_doc` posts real Google Docs comments as the connected account. With `quoted_text` it anchors the comment to that passage via the Docs API `insertComment` (Developer Preview; needs the Docs API enabled in the Cloud project), falling back to an unanchored Drive comment with the quote in the card and saying so in the reply. Never send Drive's `anchor` field — Docs renders it as "Original content deleted".
 
 ## Conventions
 

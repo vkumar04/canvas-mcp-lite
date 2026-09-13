@@ -5,7 +5,40 @@ import json
 from typing import Optional, Union
 
 from ..client import CanvasAPIError, canvas_graphql, canvas_paginated, canvas_request
-from ..util import get_course_id
+from ..util import format_date, get_course_id
+
+
+async def _latest_attempt(course_id: int, assignment_id, user_id) -> tuple[Optional[int], list[str]]:
+    """(current attempt number, submitted_at of every attempt) for one student.
+    Canvas keeps one submission record per student and stacks resubmissions on
+    it as attempts; a comment posted without comment[attempt] shows on every
+    attempt in SpeedGrader, so graders pin it to the latest. Returns (None, [])
+    if the lookup fails — grading must not be blocked by a flaky read."""
+    try:
+        sub = await canvas_request(
+            "GET",
+            f"/courses/{course_id}/assignments/{assignment_id}/submissions/{user_id}",
+            params={"include[]": "submission_history"},
+        )
+    except CanvasAPIError:
+        return None, []
+    attempt = sub.get("attempt")
+    history = [h.get("submitted_at") for h in (sub.get("submission_history") or []) if h.get("submitted_at")]
+    return (int(attempt) if attempt else None), sorted(history)
+
+
+def _attempt_note(attempt: Optional[int], history: list[str], comment: Optional[str]) -> str:
+    """Warn the grader when a student has submitted more than once."""
+    if not attempt or attempt <= 1:
+        return ""
+    stamps = ", ".join(format_date(t) for t in history) if history else "timestamps unavailable"
+    note = (
+        f"\nNOTE: this student submitted {attempt} times ({stamps}). "
+        f"The grade applies to the most recent submission (attempt {attempt})"
+    )
+    if comment:
+        note += f"; the comment was attached to attempt {attempt} only"
+    return note + ". Use get_submission_content to confirm you graded the latest version."
 
 
 async def grade_submission(
@@ -20,7 +53,9 @@ async def grade_submission(
     """Post a grade and/or comment for one student's submission on one assignment.
     Use score for points-based assignments. Use grade for other grading types:
     'complete'/'incomplete' (pass_fail), a letter like 'A-' (letter_grade), or '85%' (percent).
-    Set excuse=True to mark the assignment excused for this student instead of scoring it."""
+    Set excuse=True to mark the assignment excused for this student instead of scoring it.
+    If the student has resubmitted, the comment is attached to the most recent attempt
+    and the reply says how many times they submitted."""
     course_id = await get_course_id(course_identifier)
     payload: dict = {}
     if excuse:
@@ -33,6 +68,10 @@ async def grade_submission(
         payload["comment"] = {"text_comment": comment}
     if not payload:
         return "Nothing to do — provide score, grade, comment, and/or excuse=True."
+
+    attempt, history = await _latest_attempt(course_id, assignment_id, user_id)
+    if comment and attempt:
+        payload["comment"]["attempt"] = attempt
 
     url = f"/courses/{course_id}/assignments/{assignment_id}/submissions/{user_id}"
     try:
@@ -67,6 +106,7 @@ async def grade_submission(
         f"Graded user {user_id}: score={result.get('score')}, "
         f"grade={result.get('grade')}, excused={result.get('excused')}, "
         f"workflow_state={result.get('workflow_state')}"
+        + _attempt_note(attempt, history, comment)
     )
 
 
@@ -120,7 +160,9 @@ async def bulk_grade_submissions(
     comment: Optional[str] = None,
 ) -> str:
     """Post grades for many students at once on one assignment.
-    grades: {user_id: score, ...}. Same optional comment applied to every submission.
+    grades: {user_id: score, ...}. Same optional comment applied to every submission
+    (Canvas's bulk endpoint can't pin comments to an attempt — use grade_submission
+    for students who have resubmitted).
     This is a single high-blast-radius call — double check the grades dict before calling."""
     course_id = await get_course_id(course_identifier)
     grade_data: dict = {}
@@ -188,7 +230,8 @@ async def grade_with_rubric(
 ) -> str:
     """Grade a submission using a rubric already associated with the assignment.
     criterion_scores: {criterion_id: points, ...} — get criterion_ids from get_rubric.
-    criterion_comments: optional {criterion_id: comment text, ...}."""
+    criterion_comments: optional {criterion_id: comment text, ...}. A comment is
+    attached to the student's most recent attempt; the reply flags resubmissions."""
     course_id = await get_course_id(course_identifier)
     rubric_assessment: dict = {}
     for criterion_id, points in criterion_scores.items():
@@ -198,8 +241,11 @@ async def grade_with_rubric(
         rubric_assessment[criterion_id] = entry
 
     payload: dict = {"rubric_assessment": rubric_assessment}
+    attempt, history = await _latest_attempt(course_id, assignment_id, user_id)
     if comment:
         payload["comment"] = {"text_comment": comment}
+        if attempt:
+            payload["comment"]["attempt"] = attempt
 
     result = await canvas_request(
         "PUT",
@@ -208,7 +254,7 @@ async def grade_with_rubric(
     )
     return (
         f"Graded user {user_id} with rubric: total score={result.get('score')}, "
-        f"grade={result.get('grade')}"
+        f"grade={result.get('grade')}" + _attempt_note(attempt, history, comment)
     )
 
 
