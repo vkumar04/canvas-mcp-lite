@@ -19,6 +19,7 @@ from .tools import (
     discussions,
     files,
     google_docs,
+    google_slides,
     grading,
     integrity,
     messaging,
@@ -70,8 +71,9 @@ async def homepage(request: Request) -> HTMLResponse:
         "<h1>Canvas Grading Assistant</h1>"
         "<p>A private teaching-assistant service (an MCP server) used by an "
         "instructor to manage Canvas LMS coursework and provide feedback on "
-        "student writing, including comments on Google Docs that students "
-        "share with the instructor.</p>"
+        "student work, including comments on Google Docs and Google Slides that "
+        "students share with the instructor, and editing the instructor's own "
+        "Google Slides lecture decks.</p>"
         "<p><a href='/privacy'>Privacy policy</a></p>"
         "</body></html>"
     )
@@ -89,8 +91,10 @@ async def privacy_policy(request: Request) -> HTMLResponse:
         "<h2>Google user data</h2>"
         "<p>With the instructor's explicit authorization via Google sign-in, the "
         "service accesses Google Drive solely to: (1) read the text of documents "
-        "students have shared with the instructor for grading, and (2) post "
-        "feedback comments on those documents on the instructor's behalf.</p>"
+        "and presentations students have shared with the instructor for grading, "
+        "(2) post feedback comments on those files on the instructor's behalf, and "
+        "(3) read, create, and edit the instructor's own Google Slides decks at "
+        "the instructor's request.</p>"
         "<p>The service stores only the OAuth credentials needed to act on the "
         "instructor's behalf. It does not store document contents, sell or share "
         "any data with third parties, use data for advertising, or transfer data "
@@ -129,6 +133,9 @@ READ_TOOLS = [
     google_docs.read_google_doc,
     google_docs.get_google_doc_forensics,
     google_docs.list_google_doc_comments,
+    google_slides.list_google_slides,
+    google_slides.read_google_slides,
+    google_slides.list_google_slides_comments,
     quizzes.list_quizzes,
     quizzes.get_quiz_details,
     quizzes.list_quiz_submissions,
@@ -162,6 +169,15 @@ WRITE_TOOLS = [
     assignments.update_assignment,
     google_docs.connect_google_docs,
     google_docs.comment_on_google_doc,
+    google_slides.create_google_slides,
+    google_slides.copy_google_slides,
+    google_slides.add_google_slide,
+    google_slides.update_google_slide_text,
+    google_slides.replace_text_in_google_slides,
+    google_slides.update_google_slide_notes,
+    google_slides.move_google_slide,
+    google_slides.duplicate_google_slide,
+    google_slides.comment_on_google_slides,
     grading.grade_submission,
     grading.bulk_grade_submissions,
     grading.grade_with_rubric,
@@ -185,6 +201,7 @@ DELETE_TOOLS = [
     grading.delete_rubric,
     files.delete_course_file,
     peer_review.delete_peer_review,
+    google_slides.delete_google_slide,
 ]
 
 for fn in READ_TOOLS + WRITE_TOOLS + DELETE_TOOLS:

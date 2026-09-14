@@ -45,19 +45,19 @@ async def _explain_api_error(exc: GoogleAPIError, doc_id: str) -> str:
 
 
 async def google_docs_status() -> str:
-    """Check whether Google Docs grading is set up on this server: which
+    """Check whether Google Docs/Slides access is set up on this server: which
     credentials are present, which Google account is connected, and the next
-    setup step if anything is missing. Run this first when a Google Docs tool
-    reports a configuration problem."""
+    setup step if anything is missing. Run this first when a Google Docs or
+    Google Slides tool reports a configuration problem."""
     has_client = bool(
         os.environ.get("GOOGLE_OAUTH_CLIENT_ID") and os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
     )
-    lines = ["Google Docs grading setup:"]
+    lines = ["Google Docs / Slides setup:"]
     lines.append(f"- OAuth client (admin-provided): {'configured' if has_client else 'MISSING'}")
     if not has_client:
         lines.append(
             "\nNext step (server admin, one-time): at console.cloud.google.com enable "
-            "the Google Drive API, publish the OAuth consent screen, create a 'Web "
+            "the Google Drive, Docs, and Slides APIs, publish the OAuth consent screen, create a 'Web "
             "application' OAuth client with authorized redirect URI "
             f"{redirect_uri() or '<server URL>/oauth/google/callback'}, and set "
             "GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET in the server env."
@@ -66,7 +66,7 @@ async def google_docs_status() -> str:
 
     email = await connected_account_email()
     if email:
-        lines.append(f"- Connected Google account: {email} — doc comments will post as this account.")
+        lines.append(f"- Connected Google account: {email} — doc/slide comments and edits act as this account.")
         lines.append("\nEverything is ready. Use connect_google_docs only to switch accounts.")
     else:
         lines.append("- Connected Google account: NONE (or the stored token stopped working)")
@@ -118,11 +118,12 @@ def _find_doc_links(text: str) -> list[str]:
 async def list_google_doc_links(
     course_identifier: Union[str, int], assignment_id: Union[str, int]
 ) -> str:
-    """Collect every student's Google Doc link for an assignment where students
-    post their doc link as a submission comment (also catches online_url
-    submissions). One call gives the whole-class roster of links plus who hasn't
-    posted one yet — start here when grading Google Docs submissions, then use
-    read_google_doc / comment_on_google_doc per student."""
+    """Collect every student's Google Doc (or Google Slides) link for an
+    assignment where students post their link as a submission comment (also
+    catches online_url submissions). One call gives the whole-class roster of
+    links plus who hasn't posted one yet — start here when grading Google
+    Docs/Slides submissions, then use read_google_doc / comment_on_google_doc
+    (or read_google_slides / comment_on_google_slides) per student."""
     course_id = await get_course_id(course_identifier)
     subs = await canvas_paginated(
         f"/courses/{course_id}/assignments/{assignment_id}/submissions",
@@ -373,7 +374,7 @@ async def read_google_doc(doc_url: str) -> str:
         if meta.get("mimeType") != GOOGLE_DOC_MIME:
             return (
                 f"'{meta.get('name')}' is not a Google Doc (type: {meta.get('mimeType')}). "
-                "Only Google Docs are supported for reading and commenting."
+                "Use read_google_slides for a Google Slides deck."
             )
         text = await google_request(
             "GET",

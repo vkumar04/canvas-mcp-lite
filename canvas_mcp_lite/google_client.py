@@ -27,13 +27,15 @@ GOOGLE_DRIVE_API = "https://www.googleapis.com/drive/v3"
 # Anchored comments live on the Docs API, not Drive. The drive scope already
 # authorizes it, so connected accounts don't need to re-consent.
 GOOGLE_DOCS_API = "https://docs.googleapis.com/v1"
+# Slides API (read + in-place edit of presentations). Same drive scope.
+GOOGLE_SLIDES_API = "https://slides.googleapis.com/v1"
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 SETUP_MESSAGE = (
     "The instructor's Google account isn't connected yet. Run the "
     "google_docs_status tool to see what's missing, then connect_google_docs to "
     "get a sign-in link the instructor opens in their browser — approving it "
-    "activates Google Docs commenting. (Local stdio servers can run the "
+    "activates Google Docs and Slides access. (Local stdio servers can run the "
     "`canvas-mcp-google-auth` terminal command instead.)"
 )
 
