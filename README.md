@@ -25,7 +25,7 @@ Highlights:
 
 ## Google Docs and Google Slides (optional)
 
-Students in writing courses often submit a Google Doc link rather than a file — commonly pasted as a submission comment. With a Google account connected, the grading loop becomes: `list_google_doc_links` (one call collects every student's doc link from their submission comments or URL submissions, and flags who hasn't posted one) → `read_google_doc` (read the live draft) → `comment_on_google_doc` (one call per piece of feedback, quoting the passage it refers to) → `grade_submission` (score in Canvas).
+Students in writing courses often submit a Google Doc link rather than a file — commonly pasted as a submission comment. The same connection also lets the instructor work on their own Google Slides lecture decks from chat (find, read, edit in place, build new ones) — see the Google Slides note below. With a Google account connected, the grading loop becomes: `list_google_doc_links` (one call collects every student's doc link from their submission comments or URL submissions, and flags who hasn't posted one) → `read_google_doc` (read the live draft) → `comment_on_google_doc` (one call per piece of feedback, quoting the passage it refers to) → `grade_submission` (score in Canvas).
 
 ### Connecting a Google account
 
