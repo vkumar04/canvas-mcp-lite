@@ -388,3 +388,100 @@ def test_permission_error_names_connected_account(monkeypatch):
     result = asyncio.run(google_docs.read_google_doc(DOC_ID))
     assert "hlawson3@charlotte.edu" in result
     assert "share" in result.lower()
+
+
+# --- Direct edits ---------------------------------------------------------------
+
+
+def _edit_harness(monkeypatch, *paragraphs, replies=None):
+    calls = []
+
+    async def fake_request(method, path, params=None, json_body=None, raw=False):
+        calls.append((method, path, json_body))
+        if method == "GET":
+            return _document(*paragraphs)
+        return {"replies": replies or []}
+
+    monkeypatch.setattr(google_docs, "google_request", fake_request)
+    return calls
+
+
+def _batch(calls):
+    return [c[2]["requests"] for c in calls if c[1].endswith(":batchUpdate")]
+
+
+def test_edit_text_deletes_range_then_inserts(monkeypatch):
+    calls = _edit_harness(monkeypatch, "The thesis is weak.\n")
+    result = asyncio.run(google_docs.edit_google_doc_text(DOC_ID, "thesis is weak", "argument is strong"))
+    assert "replaced" in result
+    (requests,) = _batch(calls)
+    assert requests == [
+        {"deleteContentRange": {"range": {"startIndex": 5, "endIndex": 19}}},
+        {"insertText": {"text": "argument is strong", "location": {"index": 5}}},
+    ]
+
+
+def test_edit_text_empty_replacement_deletes(monkeypatch):
+    calls = _edit_harness(monkeypatch, "Drop this. Keep this.\n")
+    result = asyncio.run(google_docs.edit_google_doc_text(DOC_ID, "Drop this. ", ""))
+    assert "deleted" in result
+    (requests,) = _batch(calls)
+    assert [list(r)[0] for r in requests] == ["deleteContentRange"]
+
+
+def test_edit_text_missing_passage_makes_no_change(monkeypatch):
+    calls = _edit_harness(monkeypatch, "Some text.\n")
+    result = asyncio.run(google_docs.edit_google_doc_text(DOC_ID, "not here", "x"))
+    assert "isn't in the document" in result
+    assert not _batch(calls)
+    assert "empty" in asyncio.run(google_docs.edit_google_doc_text(DOC_ID, "  ", "x"))
+
+
+def test_insert_after_and_before_anchor(monkeypatch):
+    calls = _edit_harness(monkeypatch, "First claim. Second claim.\n")
+    asyncio.run(google_docs.insert_text_in_google_doc(DOC_ID, " (cite)", anchor_text="First claim."))
+    (requests,) = _batch(calls)
+    assert requests[0]["insertText"] == {"text": " (cite)", "location": {"index": 13}}
+
+    calls.clear()
+    asyncio.run(
+        google_docs.insert_text_in_google_doc(DOC_ID, "Note: ", anchor_text="Second", position="before")
+    )
+    (requests,) = _batch(calls)
+    assert requests[0]["insertText"]["location"] == {"index": 14}
+
+
+def test_insert_appends_as_new_paragraph(monkeypatch):
+    calls = _edit_harness(monkeypatch, "Body.\n")
+    result = asyncio.run(google_docs.insert_text_in_google_doc(DOC_ID, "Instructor note"))
+    assert "Appended" in result
+    (requests,) = _batch(calls)
+    assert requests[0]["insertText"] == {"text": "\nInstructor note", "endOfSegmentLocation": {}}
+
+    calls.clear()  # an empty doc gets no leading newline
+    _edit_harness(monkeypatch, "\n")
+    asyncio.run(google_docs.insert_text_in_google_doc(DOC_ID, "Start"))
+
+
+def test_insert_validates_inputs(monkeypatch):
+    calls = _edit_harness(monkeypatch, "Body.\n")
+    assert "empty" in asyncio.run(google_docs.insert_text_in_google_doc(DOC_ID, ""))
+    assert "position must be" in asyncio.run(
+        google_docs.insert_text_in_google_doc(DOC_ID, "x", anchor_text="Body", position="middle")
+    )
+    assert "anchor passage isn't" in asyncio.run(
+        google_docs.insert_text_in_google_doc(DOC_ID, "x", anchor_text="missing")
+    )
+    assert not _batch(calls)
+
+
+def test_replace_text_reports_count(monkeypatch):
+    calls = _edit_harness(monkeypatch, replies=[{"replaceAllText": {"occurrencesChanged": 4}}])
+    result = asyncio.run(google_docs.replace_text_in_google_doc(DOC_ID, "teh", "the", match_case=False))
+    assert "Replaced 4 occurrence(s)" in result
+    (requests,) = _batch(calls)
+    assert requests[0]["replaceAllText"] == {
+        "containsText": {"text": "teh", "matchCase": False},
+        "replaceText": "the",
+    }
+    assert not any(c[0] == "GET" for c in calls)  # no document read needed

@@ -388,7 +388,7 @@ async def read_google_doc(doc_url: str) -> str:
         return await _explain_api_error(exc, doc_id)
 
     name = meta.get("name", doc_id)
-    body = text.strip() or "(document is empty)"
+    body = text.lstrip("\ufeff").strip() or "(document is empty)"  # plain-text export starts with a BOM
     return f"Google Doc: {name} (doc_id: {doc_id})\n\n{_cap_text(body, name)}"
 
 
@@ -662,3 +662,145 @@ async def comment_on_google_doc(
         f"Posted comment {created.get('id')} on doc {doc_id} as {author}:"
         f"\n{created.get('content', comment)}{quote_note}{anchor_note}"
     )
+
+
+# --- Direct edits (Docs API batchUpdate) --------------------------------------
+#
+# These change the document itself, as the connected account, in one shot —
+# the Docs API has no "suggesting" mode, so edits are not tracked changes.
+# Feedback on student work should stay in comment_on_google_doc; these are for
+# the instructor's own docs, or student docs where an edit is explicitly wanted.
+
+DOCS_BATCH = f"{GOOGLE_DOCS_API}/documents/{{doc_id}}:batchUpdate"
+
+
+def _doc_has_text(document: dict) -> bool:
+    return any(text.strip() for _, text in _iter_text_runs((document.get("body") or {}).get("content")))
+
+
+async def _load_document(doc_id: str) -> dict:
+    return await google_request("GET", f"{GOOGLE_DOCS_API}/documents/{doc_id}", params={"fields": "body"})
+
+
+def _preview(text: str, limit: int = 80) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 3] + "..."
+
+
+async def edit_google_doc_text(
+    doc_url: str, quoted_text: str, new_text: str, occurrence: int = 1
+) -> str:
+    """Replace one passage in a Google Doc with new text — a direct edit to the
+    live document, made as the connected account (not a suggestion or comment).
+    quoted_text is the exact passage to replace (whitespace, smart quotes, and
+    capitalization are matched loosely; set occurrence if it repeats); new_text
+    takes the formatting of the passage it replaces; empty new_text deletes it.
+    Needs Editor access on the doc. For feedback on student writing, prefer
+    comment_on_google_doc — use this when the instructor wants the text
+    itself changed. Read the doc first (read_google_doc) so the quote is exact."""
+    try:
+        doc_id = extract_doc_id(doc_url)
+    except ValueError as exc:
+        return str(exc)
+    quote = quoted_text.strip()
+    if not quote:
+        return "quoted_text is empty — nothing to replace. Use insert_text_in_google_doc to add text."
+    try:
+        document = await _load_document(doc_id)
+        text_range = _locate_range(document, quote, occurrence)
+        if text_range is None:
+            return (
+                "That exact passage isn't in the document"
+                if occurrence <= 1
+                else f"The document has fewer than {occurrence} occurrences of that passage"
+            ) + " — re-read it with read_google_doc and quote the text verbatim."
+        start, end = text_range
+        requests: list[dict] = [{"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}}]
+        if new_text:
+            requests.append({"insertText": {"text": new_text, "location": {"index": start}}})
+        await google_request("POST", DOCS_BATCH.format(doc_id=doc_id), json_body={"requests": requests})
+    except GoogleConfigError as exc:
+        return str(exc)
+    except GoogleAPIError as exc:
+        return await _explain_api_error(exc, doc_id)
+    if new_text:
+        return f'Edited doc {doc_id}: replaced "{_preview(quote)}" with "{_preview(new_text)}".'
+    return f'Edited doc {doc_id}: deleted "{_preview(quote)}".'
+
+
+async def insert_text_in_google_doc(
+    doc_url: str, text: str, anchor_text: str = "", position: str = "after", occurrence: int = 1
+) -> str:
+    """Insert text into a live Google Doc as the connected account. With no
+    anchor_text the text is appended at the end as a new paragraph (e.g. an
+    end-of-paper note or a new section). With anchor_text, the text goes
+    immediately after (position="after", default) or before ("before") that
+    passage — include a leading/trailing newline in text to start a new
+    paragraph. Inserted text takes the formatting of the surrounding text.
+    Needs Editor access; this is a direct edit, not a suggestion or comment."""
+    try:
+        doc_id = extract_doc_id(doc_url)
+    except ValueError as exc:
+        return str(exc)
+    if not text:
+        return "text is empty — nothing inserted."
+    where = (position or "after").strip().lower()
+    if where not in ("after", "before"):
+        return "position must be 'after' or 'before'."
+    anchor = anchor_text.strip()
+    try:
+        document = await _load_document(doc_id)
+        if anchor:
+            text_range = _locate_range(document, anchor, occurrence)
+            if text_range is None:
+                return (
+                    "That anchor passage isn't in the document"
+                    if occurrence <= 1
+                    else f"The document has fewer than {occurrence} occurrences of the anchor"
+                ) + " — re-read it with read_google_doc and quote the text verbatim."
+            index = text_range[1] if where == "after" else text_range[0]
+            request = {"insertText": {"text": text, "location": {"index": index}}}
+        else:
+            # End of the body: prefix a newline so the addition starts its own
+            # paragraph instead of gluing onto the last line.
+            body_text = ("\n" + text) if _doc_has_text(document) else text
+            request = {"insertText": {"text": body_text, "endOfSegmentLocation": {}}}
+        await google_request("POST", DOCS_BATCH.format(doc_id=doc_id), json_body={"requests": [request]})
+    except GoogleConfigError as exc:
+        return str(exc)
+    except GoogleAPIError as exc:
+        return await _explain_api_error(exc, doc_id)
+    if anchor:
+        return f'Inserted "{_preview(text)}" {where} "{_preview(anchor)}" in doc {doc_id}.'
+    return f'Appended "{_preview(text)}" to the end of doc {doc_id}.'
+
+
+async def replace_text_in_google_doc(doc_url: str, find: str, replace: str, match_case: bool = True) -> str:
+    """Find-and-replace every occurrence of a string across a live Google Doc
+    (headers, footers, and footnotes included), as the connected account —
+    e.g. fix a recurring misspelling, rename a term, or fill {{placeholders}}
+    in a copied template. Formatting is kept. Reports how many occurrences
+    changed. Needs Editor access; direct edit, not a suggestion."""
+    try:
+        doc_id = extract_doc_id(doc_url)
+    except ValueError as exc:
+        return str(exc)
+    if not find:
+        return "The find text is empty — nothing replaced."
+    request = {
+        "replaceAllText": {
+            "containsText": {"text": find, "matchCase": bool(match_case)},
+            "replaceText": replace,
+        }
+    }
+    try:
+        result = await google_request(
+            "POST", DOCS_BATCH.format(doc_id=doc_id), json_body={"requests": [request]}
+        )
+    except GoogleConfigError as exc:
+        return str(exc)
+    except GoogleAPIError as exc:
+        return await _explain_api_error(exc, doc_id)
+    replies = (result or {}).get("replies") or [{}]
+    count = (replies[0].get("replaceAllText") or {}).get("occurrencesChanged", 0)
+    return f"Replaced {count} occurrence(s) of '{find}' with '{replace}' in doc {doc_id}."
