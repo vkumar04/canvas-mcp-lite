@@ -8,23 +8,38 @@ from ..client import CanvasAPIError, canvas_graphql, canvas_paginated, canvas_re
 from ..util import format_date, get_course_id
 
 
-async def _latest_attempt(course_id: int, assignment_id, user_id) -> tuple[Optional[int], list[str]]:
-    """(current attempt number, submitted_at of every attempt) for one student.
-    Canvas keeps one submission record per student and stacks resubmissions on
-    it as attempts; a comment posted without comment[attempt] shows on every
-    attempt in SpeedGrader, so graders pin it to the latest. Returns (None, [])
-    if the lookup fails — grading must not be blocked by a flaky read."""
+def _has_comment(existing: list[dict], comment: str) -> bool:
+    """True if an identical comment (whitespace-trimmed) is already on the submission."""
+    target = comment.strip()
+    return any((c.get("comment") or "").strip() == target for c in existing)
+
+
+async def _submission_state(
+    course_id: int, assignment_id, user_id
+) -> tuple[Optional[int], list[str], list[dict]]:
+    """(current attempt number, submitted_at of every attempt, existing comments)
+    for one student. Canvas keeps one submission record per student and stacks
+    resubmissions on it as attempts; a comment posted without comment[attempt]
+    shows on every attempt in SpeedGrader, so graders pin it to the latest. The
+    existing comments let callers skip re-posting feedback that already landed
+    (a retried or repeated grading call would otherwise duplicate it). Returns
+    (None, [], []) if the lookup fails — grading must not be blocked by a flaky read."""
     try:
         sub = await canvas_request(
             "GET",
             f"/courses/{course_id}/assignments/{assignment_id}/submissions/{user_id}",
-            params={"include[]": "submission_history"},
+            params={"include[]": ["submission_history", "submission_comments"]},
         )
     except CanvasAPIError:
-        return None, []
+        return None, [], []
     attempt = sub.get("attempt")
     history = [h.get("submitted_at") for h in (sub.get("submission_history") or []) if h.get("submitted_at")]
-    return (int(attempt) if attempt else None), sorted(history)
+    return (int(attempt) if attempt else None), sorted(history), list(sub.get("submission_comments") or [])
+
+
+_DUPLICATE_COMMENT_NOTE = (
+    "\nNOTE: an identical comment was already on this submission, so it was NOT posted again."
+)
 
 
 def _attempt_note(attempt: Optional[int], history: list[str], comment: Optional[str]) -> str:
@@ -69,7 +84,19 @@ async def grade_submission(
     if not payload:
         return "Nothing to do — provide score, grade, comment, and/or excuse=True."
 
-    attempt, history = await _latest_attempt(course_id, assignment_id, user_id)
+    attempt, history, existing = await _submission_state(course_id, assignment_id, user_id)
+    skipped_comment = False
+    if comment and _has_comment(existing, comment):
+        # Already there (earlier call whose response was lost, or a repeat
+        # request). Posting again would show the student the same feedback twice.
+        skipped_comment = True
+        payload.pop("comment")
+        comment = None
+        if not payload:
+            return (
+                f"User {user_id}: an identical comment is already on this submission, "
+                "so nothing was posted (no grade was given). Do not resend it."
+            )
     if comment and attempt:
         payload["comment"]["attempt"] = attempt
 
@@ -107,6 +134,7 @@ async def grade_submission(
         f"grade={result.get('grade')}, excused={result.get('excused')}, "
         f"workflow_state={result.get('workflow_state')}"
         + _attempt_note(attempt, history, comment)
+        + (_DUPLICATE_COMMENT_NOTE if skipped_comment else "")
     )
 
 
@@ -162,13 +190,38 @@ async def bulk_grade_submissions(
     """Post grades for many students at once on one assignment.
     grades: {user_id: score, ...}. Same optional comment applied to every submission
     (Canvas's bulk endpoint can't pin comments to an attempt — use grade_submission
-    for students who have resubmitted).
+    for students who have resubmitted, and leave those students OUT of grades so
+    they don't receive the comment twice).
+    Students who already have this exact comment on the assignment are graded
+    without re-posting it, so re-running after an unclear result is safe.
+    Call this ONCE per batch: Canvas processes it in the background, and a reply
+    of "still running" means it was accepted — do not call again for the same students.
     This is a single high-blast-radius call — double check the grades dict before calling."""
     course_id = await get_course_id(course_identifier)
+
+    # Students who already carry this comment (from an earlier call whose reply
+    # was lost, or a repeated batch) get the grade only. Canvas appends
+    # comments unconditionally, so this is the only place to dedupe.
+    already_commented: set[str] = set()
+    dedupe_failed = False
+    if comment:
+        try:
+            subs = await canvas_paginated(
+                f"/courses/{course_id}/assignments/{assignment_id}/submissions",
+                params={"include[]": "submission_comments"},
+            )
+            already_commented = {
+                str(sub.get("user_id"))
+                for sub in subs
+                if _has_comment(sub.get("submission_comments") or [], comment)
+            }
+        except CanvasAPIError:
+            dedupe_failed = True
+
     grade_data: dict = {}
     for user_id, score in grades.items():
         entry: dict = {"posted_grade": score}
-        if comment:
+        if comment and str(user_id) not in already_commented:
             entry["text_comment"] = comment
         grade_data[str(user_id)] = entry
 
@@ -178,21 +231,60 @@ async def bulk_grade_submissions(
         json_body={"grade_data": grade_data},
     )
 
-    progress_url = progress.get("url")
-    if not progress_url:
-        return f"Submitted bulk grade update for {len(grades)} student(s); no progress URL returned."
+    skipped = sorted(u for u in grade_data if str(u) in already_commented)
+    notes = ""
+    if skipped:
+        notes += (
+            f"\nComment skipped for {len(skipped)} student(s) who already had it "
+            f"(graded only): {', '.join(skipped)}."
+        )
+    if dedupe_failed:
+        notes += "\nWARNING: could not read existing comments, so no duplicate check was done."
+    do_not_repeat = (
+        "\nDo NOT call bulk_grade_submissions again for these students — "
+        "the update was accepted and re-sending would duplicate the comment."
+    )
 
-    for _ in range(15):
-        await asyncio.sleep(1)
-        # progress_url is already absolute (includes /api/v1); httpx uses it as-is over base_url.
-        status = await canvas_request("GET", progress_url)
-        state = status.get("workflow_state")
-        if state in ("completed", "failed"):
-            return (
-                f"Bulk grade update for {len(grades)} student(s): {state} "
-                f"({status.get('message', '')})"
+    progress_url = progress.get("url") if isinstance(progress, dict) else None
+    if not progress_url:
+        return (
+            f"Submitted bulk grade update for {len(grades)} student(s); no progress URL returned."
+            + notes + do_not_repeat
+        )
+
+    # Polling is best-effort: the grades are already queued on Canvas's side,
+    # so a failed status read must not surface as a failed grading call.
+    state = "pending"
+    message = ""
+    try:
+        for _ in range(15):
+            await asyncio.sleep(1)
+            # progress_url is already absolute (includes /api/v1); httpx uses it as-is over base_url.
+            status = await canvas_request("GET", progress_url)
+            state = status.get("workflow_state") or state
+            message = status.get("message") or ""
+            if state in ("completed", "failed"):
+                break
+    except CanvasAPIError as exc:
+        return (
+            f"Bulk grade update for {len(grades)} student(s) was accepted by Canvas, "
+            f"but checking its progress failed ({exc.status_code}). Check the gradebook "
+            f"before doing anything else." + notes + do_not_repeat
+        )
+
+    if state in ("completed", "failed"):
+        result = f"Bulk grade update for {len(grades)} student(s): {state} ({message})" + notes
+        if state == "failed":
+            result += (
+                "\nCanvas reported failure. Comments may still have been saved for some "
+                "students — use list_submissions or grade_submission (which skips duplicate "
+                "comments) to check and fix individual students rather than re-running the batch."
             )
-    return f"Bulk grade update for {len(grades)} student(s) still running (workflow_state pending)."
+        return result
+    return (
+        f"Bulk grade update for {len(grades)} student(s) still running (workflow_state "
+        f"{state}). Canvas has accepted it and will finish in the background." + notes + do_not_repeat
+    )
 
 
 async def list_rubrics(course_identifier: Union[str, int]) -> str:
@@ -241,7 +333,11 @@ async def grade_with_rubric(
         rubric_assessment[criterion_id] = entry
 
     payload: dict = {"rubric_assessment": rubric_assessment}
-    attempt, history = await _latest_attempt(course_id, assignment_id, user_id)
+    attempt, history, existing = await _submission_state(course_id, assignment_id, user_id)
+    skipped_comment = False
+    if comment and _has_comment(existing, comment):
+        skipped_comment = True
+        comment = None
     if comment:
         payload["comment"] = {"text_comment": comment}
         if attempt:
@@ -255,6 +351,7 @@ async def grade_with_rubric(
     return (
         f"Graded user {user_id} with rubric: total score={result.get('score')}, "
         f"grade={result.get('grade')}" + _attempt_note(attempt, history, comment)
+        + (_DUPLICATE_COMMENT_NOTE if skipped_comment else "")
     )
 
 

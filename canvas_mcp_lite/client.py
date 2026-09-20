@@ -49,26 +49,52 @@ def _client() -> httpx.AsyncClient:
     )
 
 
-def _is_transient(response: httpx.Response) -> bool:
-    if response.status_code >= 500:
-        return True
-    # Canvas throttling: 403 with a distinctive body, not a real permission error.
-    if response.status_code == 403 and "Rate Limit Exceeded" in response.text:
-        return True
-    return False
+# Methods whose repeat is harmless. PUT is deliberately excluded: Canvas's
+# submission PUT appends a comment every time it is called, so a retried
+# write can double-post feedback even though HTTP calls PUT idempotent.
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
 
 
-async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> httpx.Response:
+async def _request_with_retry(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    idempotent: Optional[bool] = None,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Send a request, retrying transient failures when it is safe to do so.
+
+    Reads retry on timeouts, 5xx, and Canvas rate-limit 403s. Writes (POST/PUT)
+    retry only when the request provably never reached Canvas — connection
+    errors and the rate limiter, which rejects before doing any work. A read
+    timeout or 5xx on a write is ambiguous: Canvas may have already saved the
+    grade and comment, and resending would duplicate the comment. Those are
+    surfaced to the caller instead. Pass idempotent=True for writes that are
+    safe to repeat (e.g. GraphQL post/hide grades)."""
+    if idempotent is None:
+        idempotent = method.upper() in _IDEMPOTENT_METHODS
     last_error: Optional[Exception] = None
     response: Optional[httpx.Response] = None
     for attempt in range(MAX_RETRIES):
         try:
             response = await client.request(method, url, **kwargs)
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            # Never left the client — always safe to retry.
             last_error = exc
             response = None
-        if response is not None and not _is_transient(response):
-            return response
+        except httpx.TimeoutException as exc:
+            # Read/write/pool timeout: the server may have processed the request.
+            if not idempotent:
+                raise
+            last_error = exc
+            response = None
+        if response is not None:
+            if response.status_code == 403 and "Rate Limit Exceeded" in response.text:
+                pass  # throttled before processing — safe for any method
+            elif response.status_code >= 500 and idempotent:
+                pass
+            else:
+                return response
         if attempt < MAX_RETRIES - 1:
             await asyncio.sleep(BACKOFF_BASE_SECONDS * (2**attempt))
     if response is not None:
@@ -149,8 +175,10 @@ async def canvas_graphql(query: str, variables: Optional[dict[str, Any]] = None)
     _require_config()
     graphql_url = CANVAS_API_URL.rsplit("/api/", 1)[0] + "/api/graphql"
     async with _client() as client:
+        # The mutations used here (post/hide grades) are safe to repeat.
         response = await _request_with_retry(
-            client, "POST", graphql_url, json={"query": query, "variables": variables or {}}
+            client, "POST", graphql_url, idempotent=True,
+            json={"query": query, "variables": variables or {}},
         )
         if response.status_code >= 400:
             raise CanvasAPIError(response.status_code, response.text, graphql_url)

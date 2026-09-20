@@ -101,3 +101,91 @@ def test_error_includes_body_and_url(monkeypatch):
     with pytest.raises(client.CanvasAPIError) as exc_info:
         asyncio.run(client.canvas_request("PUT", "/courses/1/assignments/2"))
     assert "invalid grade" in str(exc_info.value)
+
+
+def test_write_is_not_retried_on_500(monkeypatch):
+    """A 5xx on PUT/POST is ambiguous — Canvas may have saved the comment already."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(500, text="Internal Server Error")
+
+    monkeypatch.setattr(client, "_client", lambda: make_mock_client(handler))
+    with pytest.raises(client.CanvasAPIError):
+        asyncio.run(client.canvas_request("PUT", "/courses/1/assignments/2/submissions/3", json_body={}))
+    assert calls["n"] == 1
+
+
+def test_write_is_not_retried_on_read_timeout(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ReadTimeout("slow", request=request)
+
+    monkeypatch.setattr(client, "_client", lambda: make_mock_client(handler))
+    with pytest.raises(httpx.ReadTimeout):
+        asyncio.run(client.canvas_request("POST", "/courses/1/assignments/2/submissions/update_grades", json_body={}))
+    assert calls["n"] == 1
+
+
+def test_write_is_retried_on_connect_error(monkeypatch):
+    """The request never reached Canvas, so a retry cannot duplicate anything."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(client, "_client", lambda: make_mock_client(handler))
+    result = asyncio.run(client.canvas_request("PUT", "/courses/1", json_body={}))
+    assert result == {"ok": True}
+    assert calls["n"] == 2
+
+
+def test_write_is_retried_on_rate_limit(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(403, text="403 Forbidden (Rate Limit Exceeded)")
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(client, "_client", lambda: make_mock_client(handler))
+    result = asyncio.run(client.canvas_request("POST", "/courses/1", json_body={}))
+    assert result == {"ok": True}
+    assert calls["n"] == 2
+
+
+def test_read_still_retried_on_timeout(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(client, "_client", lambda: make_mock_client(handler))
+    assert asyncio.run(client.canvas_request("GET", "/courses/1")) == {"ok": True}
+    assert calls["n"] == 2
+
+
+def test_graphql_post_is_retried_on_500(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500, text="oops")
+        return httpx.Response(200, json={"data": {"ok": True}})
+
+    monkeypatch.setattr(client, "_client", lambda: make_mock_client(handler))
+    monkeypatch.setattr(client, "CANVAS_API_URL", "https://canvas.test/api/v1")
+    monkeypatch.setattr(client, "CANVAS_API_TOKEN", "t")
+    assert asyncio.run(client.canvas_graphql("mutation { x }")) == {"ok": True}
+    assert calls["n"] == 2
