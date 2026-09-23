@@ -150,6 +150,7 @@ READ_TOOLS = [
     peer_review.summarize_reviewer_annotations,
     analytics.get_assignment_analytics,
     analytics.get_student_analytics,
+    analytics.get_student_grades,
 ]
 
 WRITE_TOOLS = [
