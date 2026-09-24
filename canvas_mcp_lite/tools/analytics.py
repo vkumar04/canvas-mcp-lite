@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional, Union
 
@@ -100,8 +101,8 @@ async def get_student_grades(
     Use this before assigning a zero, writing to a student about their standing,
     or judging whether someone has "checked out" — it shows the whole pattern,
     not one assignment. Set include_other_courses=True to also list the student's
-    current grade and last activity in your other courses they're enrolled in
-    (Canvas only shows courses you share with them)."""
+    current grade and last activity in every other course you teach that they're
+    enrolled in (one lookup per course; Canvas won't show a student's courses you don't teach)."""
     course_id = await get_course_id(course_identifier)
     uid = str(user_id)
     now = datetime.now(timezone.utc)
@@ -188,33 +189,42 @@ async def get_student_grades(
 
     if include_other_courses:
         out.append("")
-        out.append("Other courses (only those you share with this student):")
+        out.append("Other courses you teach that this student is enrolled in:")
+        # Canvas only lets admins read /users/:id/enrollments directly, so ask
+        # each of the instructor's own courses whether the student is in it.
         try:
-            others = await canvas_paginated(
-                f"/users/{uid}/enrollments",
-                {"type[]": "StudentEnrollment", "state[]": "active", "include[]": "current_points"},
+            my_courses = await canvas_paginated(
+                "/courses", {"enrollment_type": "teacher", "state[]": "available"}
             )
         except CanvasAPIError as exc:
-            others = None
-            out.append(f"- unavailable (Canvas returned {exc.status_code} for this student's enrollments)")
-        if others is not None:
+            my_courses = None
+            out.append(f"- unavailable (could not list your courses: {exc.status_code})")
+        if my_courses is not None:
+            others = [c for c in my_courses if int(c.get("id", -1)) != int(course_id)]
+
+            async def lookup(course: dict):
+                try:
+                    enr = await canvas_paginated(
+                        f"/courses/{course['id']}/enrollments",
+                        {"user_id": uid, "type[]": "StudentEnrollment", "include[]": "current_points"},
+                    )
+                except CanvasAPIError:
+                    return course, None
+                return course, (enr[0] if enr else None)
+
+            results = await asyncio.gather(*(lookup(c) for c in others))
             found = 0
-            for enr in others:
-                cid = enr.get("course_id")
-                if cid is None or int(cid) == int(course_id):
+            for course, enr in results:
+                if not enr:
                     continue
                 found += 1
-                label = f"course {cid}"
-                try:
-                    course = await canvas_request("GET", f"/courses/{cid}")
-                    label = f"{course.get('course_code') or ''} {course.get('name') or ''}".strip() or label
-                except CanvasAPIError:
-                    pass
+                label = f"{course.get('course_code') or ''} {course.get('name') or ''}".strip() or f"course {course['id']}"
                 g = enr.get("grades") or {}
                 out.append(
-                    f"- {label} (id {cid}): current {g.get('current_grade') or '—'} "
+                    f"- {label} (id {course['id']}): current {g.get('current_grade') or '—'} "
                     f"({_pts(g.get('current_score'))}%), final-if-zeros {_pts(g.get('final_score'))}%, "
-                    f"last activity {format_date(enr.get('last_activity_at'))}"
+                    f"last activity {format_date(enr.get('last_activity_at'))}, "
+                    f"enrollment {enr.get('enrollment_state', '?')}"
                 )
             if not found:
                 out.append("- none")

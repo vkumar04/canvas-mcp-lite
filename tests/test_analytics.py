@@ -45,7 +45,10 @@ ENROLLMENT = {
 }
 
 
-def _install(monkeypatch, other_enrollments=None, enrollment_error=None):
+def _install(monkeypatch, other_enrollments=None, enrollment_error=None, courses_error=None):
+    """other_enrollments: {course_id: enrollment dict | None | CanvasAPIError}."""
+    other_enrollments = other_enrollments or {}
+
     async def fake_paginated(path, params=None, max_pages=20):
         if path.endswith("/students/submissions"):
             assert params["student_ids[]"] == "42"
@@ -55,18 +58,24 @@ def _install(monkeypatch, other_enrollments=None, enrollment_error=None):
                 raise enrollment_error
             assert params["user_id"] == "42"
             return [ENROLLMENT]
-        if path == "/users/42/enrollments":
-            if isinstance(other_enrollments, Exception):
-                raise other_enrollments
-            return list(other_enrollments or [])
+        if path == "/courses":
+            if courses_error:
+                raise courses_error
+            assert params["enrollment_type"] == "teacher"
+            return [{"id": 100, "course_code": "THIS"}] + [
+                {"id": cid, "course_code": f"ENGL-{cid}", "name": "Writing"} for cid in other_enrollments
+            ]
+        if path.startswith("/courses/") and path.endswith("/enrollments"):
+            cid = int(path.split("/")[2])
+            assert params["user_id"] == "42"
+            val = other_enrollments[cid]
+            if isinstance(val, Exception):
+                raise val
+            return [val] if val else []
         raise AssertionError(path)
 
     async def fake_request(method, path, params=None, json_body=None, data=None):
-        assert method == "GET"
-        cid = int(path.rsplit("/", 1)[1])
-        if cid == 300:
-            raise CanvasAPIError(403, "nope", path)
-        return {"course_code": f"ENGL-{cid}", "name": "Writing"}
+        raise AssertionError("no single requests expected")
 
     monkeypatch.setattr(analytics, "canvas_paginated", fake_paginated)
     monkeypatch.setattr(analytics, "canvas_request", fake_request)
@@ -95,23 +104,29 @@ def test_student_grades_report(monkeypatch):
 
 
 def test_other_courses_listed_and_current_course_skipped(monkeypatch):
-    _install(monkeypatch, other_enrollments=[
-        {"course_id": 100, "grades": {"current_score": 72.5}},
-        {"course_id": 200, "grades": {"current_grade": "B", "current_score": 85, "final_score": 80},
-         "last_activity_at": "2026-09-12T10:00:00Z"},
-        {"course_id": 300, "grades": {"current_score": None, "final_score": None}},
-    ])
+    _install(monkeypatch, other_enrollments={
+        200: {"grades": {"current_grade": "B", "current_score": 85, "final_score": 80},
+              "last_activity_at": "2026-09-12T10:00:00Z", "enrollment_state": "active"},
+        300: None,  # taught by me, student not enrolled
+        400: CanvasAPIError(403, "nope", "/courses/400/enrollments"),  # lookup refused -> skipped
+    })
     out = asyncio.run(analytics.get_student_grades(100, 42, include_other_courses=True))
-    assert "Other courses" in out
-    assert "- ENGL-200 Writing (id 200): current B (85%), final-if-zeros 80%, last activity 2026-09-12 10:00 UTC" in out
-    assert "- course 300 (id 300): current — (?%)" in out  # name lookup forbidden, still listed
-    assert out.count("(id 100)") == 0
+    assert "Other courses you teach" in out
+    assert "- ENGL-200 Writing (id 200): current B (85%), final-if-zeros 80%, last activity 2026-09-12 10:00 UTC, enrollment active" in out
+    assert "(id 300)" not in out and "(id 400)" not in out
+    assert "(id 100)" not in out
 
 
-def test_other_courses_permission_error_is_reported_not_raised(monkeypatch):
-    _install(monkeypatch, other_enrollments=CanvasAPIError(401, "unauthorized", "/users/42/enrollments"))
+def test_other_courses_none_found(monkeypatch):
+    _install(monkeypatch, other_enrollments={200: None})
     out = asyncio.run(analytics.get_student_grades(100, 42, include_other_courses=True))
-    assert "unavailable (Canvas returned 401" in out
+    assert out.rstrip().endswith("- none")
+
+
+def test_other_courses_listing_failure_is_reported_not_raised(monkeypatch):
+    _install(monkeypatch, courses_error=CanvasAPIError(401, "unauthorized", "/courses"))
+    out = asyncio.run(analytics.get_student_grades(100, 42, include_other_courses=True))
+    assert "unavailable (could not list your courses: 401)" in out
     assert "Grade record for Sam Student" in out
 
 
