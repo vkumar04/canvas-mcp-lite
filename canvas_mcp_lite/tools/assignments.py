@@ -7,6 +7,17 @@ from ..util import format_date, get_course_id
 from .files import download_and_extract_text
 
 
+def _availability(a: dict) -> str:
+    return f"Available: {format_date(a.get('unlock_at'))} → {format_date(a.get('lock_at'))}"
+
+
+def _set_date(fields: dict, key: str, value: Optional[str]) -> None:
+    """ISO-8601 sets the date; an empty string clears it (Canvas accepts null)."""
+    if value is None:
+        return
+    fields[key] = value.strip() or None
+
+
 async def list_assignments(course_identifier: Union[str, int]) -> str:
     """List assignments in a course with due dates and points."""
     course_id = await get_course_id(course_identifier)
@@ -19,6 +30,7 @@ async def list_assignments(course_identifier: Union[str, int]) -> str:
             f"ID: {a.get('id')}\n"
             f"Name: {a.get('name')}\n"
             f"Due: {format_date(a.get('due_at'))}\n"
+            f"{_availability(a)}\n"
             f"Points: {a.get('points_possible')}\n"
             f"Published: {'Yes' if a.get('published') else 'No'}"
         )
@@ -33,6 +45,7 @@ async def get_assignment_details(course_identifier: Union[str, int], assignment_
         f"Name: {a.get('name')}\n"
         f"ID: {a.get('id')}\n"
         f"Due: {format_date(a.get('due_at'))}\n"
+        f"{_availability(a)}\n"
         f"Points: {a.get('points_possible')}\n"
         f"Submission Types: {', '.join(a.get('submission_types', []))}\n"
         f"Published: {'Yes' if a.get('published') else 'No'}\n\n"
@@ -210,15 +223,19 @@ async def create_assignment(
     due_at: Optional[str] = None,
     published: bool = False,
     submission_types: Optional[str] = None,
+    unlock_at: Optional[str] = None,
+    lock_at: Optional[str] = None,
 ) -> str:
-    """Create an assignment. due_at is ISO-8601 (e.g. 2026-10-09T23:59:59-04:00). Defaults to unpublished.
+    """Create an assignment. Dates are ISO-8601 (e.g. 2026-10-09T23:59:59-04:00). Defaults to unpublished.
+    unlock_at/lock_at set the "Available from"/"Available until" window; the due date must fall inside it.
     submission_types is a comma-separated string, e.g. "online_upload,online_text_entry" or "on_paper"."""
     course_id = await get_course_id(course_identifier)
     fields: dict = {"name": name, "description": description, "published": published}
     if points_possible is not None:
         fields["points_possible"] = points_possible
-    if due_at is not None:
-        fields["due_at"] = due_at
+    _set_date(fields, "due_at", due_at)
+    _set_date(fields, "unlock_at", unlock_at)
+    _set_date(fields, "lock_at", lock_at)
     if submission_types is not None:
         fields["submission_types"] = [t.strip() for t in submission_types.split(",") if t.strip()]
     a = await canvas_request(
@@ -237,8 +254,13 @@ async def update_assignment(
     published: Optional[bool] = None,
     peer_reviews: Optional[bool] = None,
     automatic_peer_reviews: Optional[bool] = None,
+    unlock_at: Optional[str] = None,
+    lock_at: Optional[str] = None,
 ) -> str:
-    """Update an assignment's name, description, points, due date, published state, and/or peer review settings.
+    """Update an assignment's name, description, points, dates, published state, and/or peer review settings.
+    Dates are ISO-8601. unlock_at/lock_at are the "Available from"/"Available until" window; Canvas rejects a
+    due date outside it, so when moving a due date past the current lock_at, pass a later lock_at in the same
+    call (or "" to clear it). Check get_assignment_details for the current window.
     peer_reviews=True must be set before assign_peer_review will work on this assignment."""
     course_id = await get_course_id(course_identifier)
     fields: dict = {}
@@ -248,8 +270,9 @@ async def update_assignment(
         fields["description"] = description
     if points_possible is not None:
         fields["points_possible"] = points_possible
-    if due_at is not None:
-        fields["due_at"] = due_at
+    _set_date(fields, "due_at", due_at)
+    _set_date(fields, "unlock_at", unlock_at)
+    _set_date(fields, "lock_at", lock_at)
     if published is not None:
         fields["published"] = published
     if peer_reviews is not None:
@@ -263,7 +286,11 @@ async def update_assignment(
         f"/courses/{course_id}/assignments/{assignment_id}",
         json_body={"assignment": fields},
     )
-    return f"Updated assignment '{a.get('name')}' (due: {format_date(a.get('due_at'))}, published: {a.get('published')})"
+    return (
+        f"Updated assignment '{a.get('name')}' (due: {format_date(a.get('due_at'))}, "
+        f"available {format_date(a.get('unlock_at'))} → {format_date(a.get('lock_at'))}, "
+        f"published: {a.get('published')})"
+    )
 
 
 async def delete_assignment(course_identifier: Union[str, int], assignment_id: Union[str, int]) -> str:

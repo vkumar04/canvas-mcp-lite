@@ -102,3 +102,45 @@ def test_missing_submissions_filters_and_groups(monkeypatch):
     result = asyncio.run(assignments.list_missing_submissions(100))
     assert "A Student" in result
     assert "B Student" not in result
+
+
+def _capture_put(monkeypatch):
+    calls = []
+
+    async def fake_request(method, path, params=None, json_body=None, data=None):
+        calls.append((method, path, json_body))
+        return {"name": "Exit Ticket", "due_at": "2026-09-25T20:00:00Z",
+                "unlock_at": None, "lock_at": "2026-09-25T21:00:00Z", "published": True}
+
+    monkeypatch.setattr(assignments, "canvas_request", fake_request)
+    return calls
+
+
+def test_update_assignment_sends_availability_window(monkeypatch):
+    calls = _capture_put(monkeypatch)
+    out = asyncio.run(assignments.update_assignment(
+        100, 7, due_at="2026-09-25T20:00:00Z", lock_at="2026-09-25T21:00:00Z"))
+    assert calls == [("PUT", "/courses/100/assignments/7",
+                      {"assignment": {"due_at": "2026-09-25T20:00:00Z", "lock_at": "2026-09-25T21:00:00Z"}})]
+    assert "available" in out and "2026-09-25 21:00 UTC" in out
+
+
+def test_update_assignment_empty_string_clears_date(monkeypatch):
+    calls = _capture_put(monkeypatch)
+    asyncio.run(assignments.update_assignment(100, 7, lock_at="", unlock_at=" "))
+    assert calls[0][2] == {"assignment": {"lock_at": None, "unlock_at": None}}
+
+
+def test_create_assignment_sends_availability_window(monkeypatch):
+    calls = _capture_put(monkeypatch)
+    asyncio.run(assignments.create_assignment(
+        100, "Quiz", unlock_at="2026-10-01T00:00:00Z", lock_at="2026-10-02T00:00:00Z"))
+    body = calls[0][2]["assignment"]
+    assert body["unlock_at"] == "2026-10-01T00:00:00Z" and body["lock_at"] == "2026-10-02T00:00:00Z"
+    assert "due_at" not in body
+
+
+def test_assignment_details_shows_availability(monkeypatch):
+    _capture_put(monkeypatch)
+    out = asyncio.run(assignments.get_assignment_details(100, 7))
+    assert "Available: " in out and "→ 2026-09-25 21:00 UTC" in out
