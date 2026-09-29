@@ -13,6 +13,7 @@ import httpx
 
 from ..client import CANVAS_API_URL, CanvasAPIError, canvas_paginated, canvas_request
 from ..util import format_date, get_course_id
+from .quiz_questions import QuestionError, new_quiz_item, parse_questions, total_points
 
 
 def _quiz_api(path: str) -> str:
@@ -278,3 +279,196 @@ async def get_new_quiz_item_analysis(
     if not isinstance(report, list):
         return f"Unexpected report format for {title}: {str(report)[:300]}"
     return format_item_analysis(report, items, title, assignment_id)
+
+
+# ------------------------------------------------------------- creating
+
+
+def _fmt_points(value) -> str:
+    if value is None:
+        return "?"
+    value = float(value)
+    return str(int(value)) if value == int(value) else str(value)
+
+
+async def _add_items(course_id: int, assignment_id, questions: list[dict], start_position: int) -> tuple[list[str], Optional[str]]:
+    """POST each item; stop at the first rejection so the caller can fix that
+    question instead of getting a half-random subset."""
+    added: list[str] = []
+    for offset, q in enumerate(questions):
+        payload = new_quiz_item(q, start_position + offset)
+        try:
+            created = await canvas_request(
+                "POST",
+                _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}/items"),
+                json_body={"item": payload},
+            )
+        except CanvasAPIError as exc:
+            return added, (
+                f"Canvas rejected question {offset + 1} ({q['type']}: {q['title'][:60]!r}) "
+                f"with HTTP {exc.status_code}: {str(exc)[:300]}"
+            )
+        added.append(
+            f"  {start_position + offset}. [{q['type']}, {_fmt_points(q['points'])} pts] "
+            f"{q['title'][:80]} (item ID {(created or {}).get('id')})"
+        )
+    return added, None
+
+
+async def create_new_quiz(
+    course_identifier: Union[str, int],
+    title: str,
+    questions_json: str = "",
+    instructions: str = "",
+    time_limit_minutes: Optional[int] = None,
+    allowed_attempts: int = 1,
+    shuffle_questions: bool = False,
+    shuffle_answers: bool = False,
+    one_question_at_a_time: bool = False,
+    due_at: Optional[str] = None,
+    unlock_at: Optional[str] = None,
+    lock_at: Optional[str] = None,
+    published: bool = False,
+) -> str:
+    """Create a NEW QUIZ (Quizzes.Next, the engine most current courses use) with its
+    questions in one call. If the instructor's existing quizzes are classic (list_quizzes
+    has them, list_new_quizzes is empty), use create_quiz instead.
+
+    questions_json is a JSON array in the SAME format as create_quiz:
+      multiple_choice  {"type":"multiple_choice","text":"...","points":1,
+                        "answers":[{"text":"A","correct":true,"feedback":"optional"},{"text":"B"}]}
+      multiple_answers {"type":"multiple_answers","text":"...","answers":[{"text":"A","correct":true},
+                        {"text":"B","correct":true},{"text":"C"}],"partial_credit":false}
+      true_false       {"type":"true_false","text":"...","answer":true}
+      short_answer     {"type":"short_answer","text":"The capital of France is ___.","answers":["Paris"]}
+                       (fill-in-the-blank; "___" marks where the blank goes, case-insensitive)
+      essay            {"type":"essay","text":"...","grading_notes":"optional, instructor-only"}
+      numerical        {"type":"numerical","text":"...","answer":3.14,"margin":0.01}
+                       or {"type":"numerical","text":"...","range":[10,20]}
+      matching         {"type":"matching","text":"...","pairs":[{"left":"H2O","right":"water"},
+                        {"left":"NaCl","right":"salt"}],"distractors":["sugar"]}
+      file_upload      {"type":"file_upload","text":"..."}
+    Every question also accepts "points" (default 1), "title", "correct_feedback",
+    "incorrect_feedback", "general_feedback"; multiple_choice/multiple_answers accept
+    "shuffle": true to shuffle that question's answers.
+
+    allowed_attempts: -1 for unlimited (highest score kept). Dates are ISO-8601
+    (e.g. 2026-10-09T23:59:59-04:00). Created UNPUBLISHED unless published=True; the
+    questions go in first so students never see an empty quiz. Returns the quiz's
+    assignment ID (use it with add_new_quiz_items, update_assignment to publish or
+    change dates later, get_new_quiz_item_analysis after students take it)."""
+    course_id = await get_course_id(course_identifier)
+    questions: list[dict] = []
+    if questions_json and questions_json.strip():
+        try:
+            questions = parse_questions(questions_json)
+        except QuestionError as exc:
+            return f"Nothing created. {exc}"
+
+    settings: dict = {
+        "shuffle_questions": shuffle_questions,
+        "shuffle_answers": shuffle_answers,
+        "one_at_a_time_type": "question" if one_question_at_a_time else "none",
+        "allow_backtracking": True,
+        "calculator_type": "none",
+    }
+    if time_limit_minutes:
+        settings["has_time_limit"] = True
+        settings["session_time_limit_in_seconds"] = int(time_limit_minutes) * 60
+    if allowed_attempts != 1:
+        settings["multiple_attempts"] = {
+            "multiple_attempts_enabled": True,
+            "attempt_limit": allowed_attempts > 0,
+            "max_attempts": allowed_attempts if allowed_attempts > 0 else None,
+            "score_to_keep": "highest",
+        }
+    fields: dict = {"title": title, "instructions": instructions, "quiz_settings": settings, "grading_type": "points"}
+    if questions:
+        fields["points_possible"] = total_points(questions)
+    for key, value in (("due_at", due_at), ("unlock_at", unlock_at), ("lock_at", lock_at)):
+        if value:
+            fields[key] = value
+
+    try:
+        quiz = await canvas_request("POST", _quiz_api(f"/courses/{course_id}/quizzes"), json_body={"quiz": fields})
+    except CanvasAPIError as exc:
+        if exc.status_code in (401, 403, 404):
+            return (
+                f"Canvas refused to create a New Quiz in course {course_id} (HTTP {exc.status_code}). "
+                "New Quizzes may not be enabled for this course/account — create_quiz makes a classic quiz instead."
+            )
+        raise
+    assignment_id = quiz.get("id")
+
+    added, error = await _add_items(course_id, assignment_id, questions, 1)
+
+    if published and not error:
+        try:
+            await canvas_request(
+                "PUT", f"/courses/{course_id}/assignments/{assignment_id}", json_body={"assignment": {"published": True}}
+            )
+            quiz["published"] = True
+        except CanvasAPIError as exc:
+            error = f"questions were added but publishing failed (HTTP {exc.status_code}); publish it with update_assignment"
+
+    lines = [
+        f"Created New Quiz '{quiz.get('title')}' (assignment ID: {assignment_id}, "
+        f"published: {'Yes' if quiz.get('published') else 'No'})",
+        f"Questions: {len(added)}  Points: {_fmt_points(quiz.get('points_possible'))}",
+        f"Due: {format_date(quiz.get('due_at'))}",
+        f"Link: {CANVAS_API_URL.rsplit('/api/', 1)[0]}/courses/{course_id}/assignments/{assignment_id}",
+    ]
+    if added:
+        lines.append("\n" + "\n".join(added))
+    if error:
+        lines.append(
+            f"\nSTOPPED: {error}\nThe quiz was left unpublished with the {len(added)} question(s) above. "
+            f"Fix that question and pass the remaining ones to add_new_quiz_items with assignment_id={assignment_id}."
+        )
+    elif not questions:
+        lines.append(f"\nNo questions yet — add them with add_new_quiz_items (assignment_id={assignment_id}).")
+    return "\n".join(lines)
+
+
+async def add_new_quiz_items(
+    course_identifier: Union[str, int], assignment_id: Union[str, int], questions_json: str
+) -> str:
+    """Append questions to an existing NEW QUIZ (assignment_id from list_new_quizzes or
+    create_new_quiz). questions_json uses the same format as create_new_quiz. The
+    quiz's total points are raised to match. Published quizzes show new questions to
+    students immediately."""
+    course_id = await get_course_id(course_identifier)
+    try:
+        questions = parse_questions(questions_json)
+    except QuestionError as exc:
+        return f"Nothing added. {exc}"
+    existing = await canvas_paginated(_quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}/items"))
+    start = len(existing) + 1
+    added, error = await _add_items(course_id, assignment_id, questions, start)
+
+    quiz = await canvas_request("GET", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"))
+    new_total = float(quiz.get("points_possible") or 0) + sum(q["points"] for q in questions[: len(added)])
+    quiz = await canvas_request(
+        "PATCH",
+        _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"),
+        json_body={"quiz": {"points_possible": new_total}},
+    ) or quiz
+
+    lines = [
+        f"Added {len(added)} question(s) to New Quiz '{quiz.get('title')}' (assignment ID: {assignment_id}). "
+        f"Now {start - 1 + len(added)} questions, {_fmt_points(quiz.get('points_possible'))} points."
+    ]
+    if added:
+        lines.append("\n".join(added))
+    if error:
+        lines.append(f"STOPPED: {error}\nQuestions after that one were not added.")
+    return "\n".join(lines)
+
+
+async def delete_new_quiz(course_identifier: Union[str, int], assignment_id: Union[str, int]) -> str:
+    """PERMANENTLY delete a New Quiz (its assignment, questions, and every student
+    attempt). This cannot be undone. For a classic quiz use delete_quiz."""
+    course_id = await get_course_id(course_identifier)
+    quiz = await canvas_request("DELETE", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"))
+    title = (quiz or {}).get("title", assignment_id)
+    return f"Deleted New Quiz '{title}' (assignment ID: {assignment_id})."

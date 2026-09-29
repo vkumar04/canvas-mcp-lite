@@ -182,6 +182,10 @@ WRITE_TOOLS = [
     google_slides.move_google_slide,
     google_slides.duplicate_google_slide,
     google_slides.comment_on_google_slides,
+    quizzes.create_quiz,
+    quizzes.add_quiz_questions,
+    new_quizzes.create_new_quiz,
+    new_quizzes.add_new_quiz_items,
     grading.grade_submission,
     grading.bulk_grade_submissions,
     grading.grade_with_rubric,
@@ -206,6 +210,8 @@ DELETE_TOOLS = [
     files.delete_course_file,
     peer_review.delete_peer_review,
     google_slides.delete_google_slide,
+    quizzes.delete_quiz,
+    new_quizzes.delete_new_quiz,
 ]
 
 for fn in READ_TOOLS + WRITE_TOOLS + DELETE_TOOLS:
