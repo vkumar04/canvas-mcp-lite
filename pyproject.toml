@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "railway-sdk>=0.2.0"]  # railway-sdk: only for `railway config plan/apply` (.railway/railway.py)
 
 [project.scripts]
 canvas-mcp-lite = "canvas_mcp_lite.server:main"
