@@ -140,6 +140,7 @@ READ_TOOLS = [
     quizzes.get_quiz_details,
     quizzes.list_quiz_submissions,
     new_quizzes.list_new_quizzes,
+    new_quizzes.get_new_quiz_details,
     new_quizzes.get_new_quiz_item_analysis,
     grading.list_rubrics,
     grading.get_rubric,
@@ -184,8 +185,12 @@ WRITE_TOOLS = [
     google_slides.comment_on_google_slides,
     quizzes.create_quiz,
     quizzes.add_quiz_questions,
+    quizzes.update_quiz,
+    quizzes.update_quiz_question,
     new_quizzes.create_new_quiz,
     new_quizzes.add_new_quiz_items,
+    new_quizzes.update_new_quiz,
+    new_quizzes.update_new_quiz_item,
     grading.grade_submission,
     grading.bulk_grade_submissions,
     grading.grade_with_rubric,
@@ -211,7 +216,9 @@ DELETE_TOOLS = [
     peer_review.delete_peer_review,
     google_slides.delete_google_slide,
     quizzes.delete_quiz,
+    quizzes.delete_quiz_question,
     new_quizzes.delete_new_quiz,
+    new_quizzes.delete_new_quiz_item,
 ]
 
 for fn in READ_TOOLS + WRITE_TOOLS + DELETE_TOOLS:

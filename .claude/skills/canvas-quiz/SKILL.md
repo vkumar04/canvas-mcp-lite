@@ -1,6 +1,6 @@
 ---
 name: canvas-quiz
-description: "Build a quiz from a topic, reading, lecture deck, or list of questions and create it directly in Canvas as a Classic Quiz or a New Quiz (or both). Use whenever the user wants a quiz, test, check-in, exit ticket, or practice questions put into Canvas. Trigger: `/canvas-quiz`."
+description: "Build a quiz from a topic, reading, lecture deck, or list of questions and create it directly in Canvas as a Classic Quiz or a New Quiz (or both), or edit an existing Canvas quiz (reword, re-key, re-weight, add or remove questions, change dates/time limit/attempts). Use whenever the user wants a quiz, test, check-in, exit ticket, or practice questions put into or changed in Canvas. Trigger: `/canvas-quiz`."
 trigger: /canvas-quiz
 ---
 
@@ -9,10 +9,10 @@ trigger: /canvas-quiz
 Turn source material into a Canvas quiz and create it with the Canvas MCP tools.
 Both quiz engines are supported through the same question JSON:
 
-| Engine | Create | Append | Delete | ID to keep |
-|---|---|---|---|---|
-| Classic Quizzes | `create_quiz` | `add_quiz_questions` | `delete_quiz` | quiz ID |
-| New Quizzes | `create_new_quiz` | `add_new_quiz_items` | `delete_new_quiz` | assignment ID |
+| Engine | Create | Append | Read (with question IDs) | Edit a question | Remove a question | Settings | Delete quiz | ID to keep |
+|---|---|---|---|---|---|---|---|---|
+| Classic Quizzes | `create_quiz` | `add_quiz_questions` | `get_quiz_details` | `update_quiz_question` | `delete_quiz_question` | `update_quiz` | `delete_quiz` | quiz ID |
+| New Quizzes | `create_new_quiz` | `add_new_quiz_items` | `get_new_quiz_details` | `update_new_quiz_item` | `delete_new_quiz_item` | `update_new_quiz` | `delete_new_quiz` | assignment ID |
 
 ## Workflow
 
@@ -26,6 +26,15 @@ Both quiz engines are supported through the same question JSON:
 5. **Show the draft to the user before creating** unless they said to just build it. Keep the review short: title, engine, question count, points, then the questions.
 6. **Create it unpublished.** Call `create_quiz` or `create_new_quiz` with `questions_json`. Pass `due_at`/`unlock_at`/`lock_at` as ISO-8601 with the course's UTC offset, `time_limit_minutes`, `allowed_attempts` (-1 = unlimited) when given. Leave `published` false unless the user explicitly says publish.
 7. **Report** the ID and link the tool returns, and how many questions and points landed. If the tool replied `STOPPED`, fix the named question and pass only the remaining questions to the append tool with the returned ID; do not re-create the quiz.
+
+## Editing an existing quiz
+
+1. Find it: `list_quizzes` / `list_new_quizzes`.
+2. Read it: `get_quiz_details` / `get_new_quiz_details` print every question with its ID, in the question JSON below.
+3. Change a question: `update_quiz_question` / `update_new_quiz_item` with ONE question object holding only what changes: `{"points": 2}`, `{"text": "..."}`, `{"answers": [...]}` (replaces all answers), `{"correct_feedback": ""}` to remove feedback. Classic can also change a question's type; New Quizzes can't, so delete that item and append the new one.
+4. Remove a question: `delete_quiz_question` / `delete_new_quiz_item` (permanent).
+5. Settings (title, dates, time limit, attempts, shuffling, publish): `update_quiz` / `update_new_quiz`; only the arguments passed change, and `""` clears a date.
+6. Published Classic quiz: students keep seeing the old version until the instructor opens the quiz in Canvas and clicks **Save**. The tool reply includes the link; pass it on. New Quizzes edits are live right away, and their point totals are re-synced automatically.
 
 ## Question JSON
 
@@ -60,5 +69,6 @@ Notes:
 
 - Never publish by default. The tools add questions first, then publish only if asked, so students never see an empty quiz.
 - Don't create the same quiz twice. If a create call failed after the quiz was made, the reply says so and gives the ID; append to it.
-- Deleting a quiz deletes student attempts. Only call a delete tool when the user asks for that quiz by name or ID.
+- Deleting a quiz deletes student attempts. Only call a delete tool when the user asks for that quiz by name or ID; the same goes for deleting single questions.
+- Editing a quiz students have already taken doesn't regrade their attempts. Say so before changing a correct answer or points on a quiz with submissions.
 - Grading a quiz that students have taken is a different job: `get_new_quiz_item_analysis` (New) or `list_quiz_submissions` (Classic).

@@ -6,7 +6,10 @@ The create tools in quizzes.py (Classic Quizzes, /api/v1) and new_quizzes.py
 `new_quiz_item` turn one of those dicts into the payload each API wants. The
 two APIs disagree about everything (question_type strings vs interaction
 slugs, answer_weight vs scoring_data, plain text vs HTML), so the format below
-is deliberately neutral and the translation is all in this file.
+is deliberately neutral and the translation is all in this file. The edit
+tools go the other way too: `classic_to_neutral` / `new_quiz_to_neutral`
+print existing questions in this format and `merge_edit` applies a partial
+edit on top of one.
 
 Question format (one object per question, in a JSON array):
 
@@ -265,17 +268,25 @@ def classic_question(q: dict, position: int) -> dict:
         "points_possible": q["points"],
         "position": position,
     }
-    if q["correct_feedback"]:
-        payload["correct_comments"] = q["correct_feedback"]
-    if q["incorrect_feedback"]:
-        payload["incorrect_comments"] = q["incorrect_feedback"]
-    if q["general_feedback"]:
-        payload["neutral_comments"] = q["general_feedback"]
+    for key, field in (
+        ("correct_feedback", "correct_comments"),
+        ("incorrect_feedback", "incorrect_comments"),
+        ("general_feedback", "neutral_comments"),
+    ):
+        if q[key]:
+            # HTML feedback (e.g. read back from a question built in the
+            # Canvas editor) belongs in the *_html field, or it shows as tags.
+            payload[field] = _plain(q[key]) if q[key].startswith("<") else q[key]
+            if q[key].startswith("<"):
+                payload[field + "_html"] = q[key]
 
     answers: list[dict] = []
     if qtype in ("multiple_choice", "multiple_answers"):
         for a in q["answers"]:
             entry = {"answer_text": a["text"], "answer_weight": 100 if a["correct"] else 0}
+            if a["text"].startswith("<"):
+                entry["answer_text"] = _plain(a["text"])
+                entry["answer_html"] = a["text"]
             if a["feedback"]:
                 # Canvas's parser reads answer_comment (singular); the plural
                 # the API docs list is silently dropped (verified live).
@@ -491,6 +502,232 @@ def new_quiz_item(q: dict, position: int) -> dict:
         "points_possible": q["points"],
         "entry": entry,
     }
+
+
+# ------------------------------------------------- reading back (for edits)
+#
+# The read tools print each existing question in the questions_json format,
+# so the caller can copy it, change a field, and pass it to an update tool.
+# Types the format can't express (Classic calculated/fill-in-multiple-blanks,
+# New Quizzes ordering/hot-spot/stimulus, multi-blank fill-ins, ...) come
+# back as None and are reported as "edit in Canvas".
+
+# Some Canvas accounts (Charlotte's DesignPlus) inject a stylesheet <link>
+# and a <script> into every Classic question_text; strip them on the way out.
+_INJECTED = re.compile(r"<link\b[^>]*>|<script\b[^>]*>.*?</script>", re.I | re.S)
+_ONE_PARAGRAPH = re.compile(r"<p>([^<]*)</p>")
+_BLANK_SPAN = re.compile(r"<span\b[^>]*\bid=\"blank_[^\"]*\"[^>]*>\s*</span>")
+
+
+def _readable(fragment: Any) -> str:
+    """Canvas HTML back to what a caller would have written: injected tags
+    dropped, a lone <p>…</p> unwrapped to plain text, real HTML kept."""
+    text = _INJECTED.sub("", str(fragment or "")).strip()
+    match = _ONE_PARAGRAPH.fullmatch(text)
+    if match:
+        return html.unescape(match.group(1)).strip()
+    if "<" not in text:
+        return html.unescape(text).strip()
+    return text
+
+
+def _num(value: Any) -> float | int:
+    value = float(value or 0)
+    return int(value) if value == int(value) else value
+
+
+def _with_common(out: dict, title: str, feedback: dict) -> dict:
+    if title and title not in (_plain(out["text"])[:80], "Question"):
+        out["title"] = title
+    for key in ("correct_feedback", "incorrect_feedback", "general_feedback"):
+        value = _readable(feedback.get(key))
+        if value:
+            out[key] = value
+    return out
+
+
+_CLASSIC_BACK = {v: k for k, v in _CLASSIC_TYPES.items()}
+
+
+def classic_to_neutral(qd: dict) -> dict | None:
+    """A Classic quiz question (GET .../questions) in questions_json form."""
+    qtype = _CLASSIC_BACK.get(qd.get("question_type"))
+    if not qtype:
+        return None
+    out: dict[str, Any] = {"type": qtype, "text": _readable(qd.get("question_text")), "points": _num(qd.get("points_possible"))}
+    answers = qd.get("answers") or []
+    if qtype in ("multiple_choice", "multiple_answers"):
+        out["answers"] = []
+        for a in answers:
+            entry: dict[str, Any] = {"text": _readable(a.get("html") or a.get("text"))}
+            if (a.get("weight") or 0) > 0:
+                entry["correct"] = True
+            feedback = _readable(a.get("comments_html") or a.get("comments"))
+            if feedback:
+                entry["feedback"] = feedback
+            out["answers"].append(entry)
+    elif qtype == "true_false":
+        true = next((a for a in answers if str(a.get("text", "")).strip().lower() == "true"), None)
+        if true is None:
+            return None
+        out["answer"] = (true.get("weight") or 0) > 0
+    elif qtype == "short_answer":
+        out["answers"] = [str(a.get("text", "")).strip() for a in answers if str(a.get("text", "")).strip()]
+    elif qtype == "numerical":
+        if len(answers) != 1:
+            return None
+        a = answers[0]
+        kind = a.get("numerical_answer_type")
+        if kind == "range_answer":
+            out["range"] = [_num(a.get("start")), _num(a.get("end"))]
+        elif kind == "exact_answer":
+            out["answer"] = _num(a.get("exact"))
+            if a.get("margin"):
+                out["margin"] = _num(a.get("margin"))
+        else:  # precision_answer has no equivalent in the shared format
+            return None
+    elif qtype == "matching":
+        out["pairs"] = [{"left": str(a.get("left", "")), "right": str(a.get("right", ""))} for a in answers]
+        distractors = [d.strip() for d in str(qd.get("matching_answer_incorrect_matches") or "").split("\n") if d.strip()]
+        if distractors:
+            out["distractors"] = distractors
+    feedback = {
+        "correct_feedback": qd.get("correct_comments_html") or qd.get("correct_comments"),
+        "incorrect_feedback": qd.get("incorrect_comments_html") or qd.get("incorrect_comments"),
+        "general_feedback": qd.get("neutral_comments_html") or qd.get("neutral_comments"),
+    }
+    return _with_common(out, str(qd.get("question_name") or "").strip(), feedback)
+
+
+_NEW_QUIZ_BACK = {
+    "choice": "multiple_choice",
+    "multi-answer": "multiple_answers",
+    "true-false": "true_false",
+    "rich-fill-blank": "short_answer",
+    "essay": "essay",
+    "numeric": "numerical",
+    "matching": "matching",
+    "file-upload": "file_upload",
+}
+
+
+def new_quiz_slug(qtype: str) -> str:
+    """The interaction_type_slug new_quiz_item produces for a question type."""
+    return {v: k for k, v in _NEW_QUIZ_BACK.items()}[qtype]
+
+
+def new_quiz_to_neutral(item: dict) -> dict | None:
+    """A New Quizzes item (GET .../items) in questions_json form."""
+    if item.get("entry_type") != "Item":
+        return None
+    e = item.get("entry") or {}
+    qtype = _NEW_QUIZ_BACK.get(e.get("interaction_type_slug"))
+    if not qtype:
+        return None
+    data = e.get("interaction_data") or {}
+    scoring = e.get("scoring_data") or {}
+    body = e.get("item_body") or ""
+    if qtype == "short_answer":
+        body = _BLANK_SPAN.sub("___", body)
+    out: dict[str, Any] = {"type": qtype, "text": _readable(body), "points": _num(item.get("points_possible"))}
+
+    if qtype in ("multiple_choice", "multiple_answers"):
+        value = scoring.get("value")
+        correct = set(value if isinstance(value, list) else [value])
+        answer_feedback = e.get("answer_feedback") or {}
+        out["answers"] = []
+        for choice in sorted(data.get("choices") or [], key=lambda c: c.get("position") or 0):
+            entry: dict[str, Any] = {"text": _readable(choice.get("item_body"))}
+            if choice.get("id") in correct:
+                entry["correct"] = True
+            feedback = _readable(answer_feedback.get(choice.get("id")))
+            if feedback:
+                entry["feedback"] = feedback
+            out["answers"].append(entry)
+        shuffle = (((e.get("properties") or {}).get("shuffle_rules") or {}).get("choices") or {}).get("shuffled")
+        if shuffle:
+            out["shuffle"] = True
+        if qtype == "multiple_answers" and e.get("scoring_algorithm") == "PartialScore":
+            out["partial_credit"] = True
+    elif qtype == "true_false":
+        out["answer"] = bool(scoring.get("value"))
+    elif qtype == "short_answer":
+        blanks = data.get("blanks") or []
+        rules = scoring.get("value") or []
+        if len(blanks) != 1 or len(rules) != 1 or blanks[0].get("answer_type") != "openEntry":
+            return None
+        accepted = (rules[0].get("scoring_data") or {}).get("value")
+        out["answers"] = [str(a) for a in (accepted if isinstance(accepted, list) else [accepted]) if str(a or "").strip()]
+    elif qtype == "essay":
+        notes = scoring.get("value")
+        if isinstance(notes, str) and notes.strip():
+            out["grading_notes"] = notes.strip()
+    elif qtype == "numerical":
+        rules = scoring.get("value") or []
+        if len(rules) != 1:
+            return None
+        rule = rules[0]
+        if rule.get("type") == "exactResponse":
+            out["answer"] = _num(rule.get("value"))
+        elif rule.get("type") == "marginOfError":
+            value, margin = float(rule.get("value") or 0), float(rule.get("margin") or 0)
+            if rule.get("margin_type") == "percent":
+                margin = abs(value) * margin / 100
+            out["answer"], out["margin"] = _num(value), _num(margin)
+        elif rule.get("type") == "withinARange":
+            out["range"] = [_num(rule.get("start")), _num(rule.get("end"))]
+        else:
+            return None
+    elif qtype == "matching":
+        rights = scoring.get("value") or {}
+        out["pairs"] = [
+            {"left": _readable(p.get("item_body")), "right": str(rights.get(p.get("id"), ""))}
+            for p in data.get("questions") or []
+        ]
+        used = set(rights.values())
+        distractors = [a for a in data.get("answers") or [] if a not in used]
+        if distractors:
+            out["distractors"] = distractors
+        if e.get("scoring_algorithm") == "PartialDeep":
+            out["partial_credit"] = True
+    feedback = e.get("feedback") or {}
+    return _with_common(
+        out,
+        str(e.get("title") or "").strip(),
+        {
+            "correct_feedback": feedback.get("correct"),
+            "incorrect_feedback": feedback.get("incorrect"),
+            "general_feedback": feedback.get("neutral"),
+        },
+    )
+
+
+_COMMON_KEYS = ("text", "points", "title", "correct_feedback", "incorrect_feedback", "general_feedback")
+
+
+def merge_edit(current: dict | None, question_json: str) -> dict:
+    """Apply an edit to an existing question and validate the result.
+
+    question_json is one question object. Keys it gives replace the current
+    ones, so {"points": 2} alone re-weights a question. Changing "type"
+    keeps only the stem, points, title, and feedback from the old question."""
+    try:
+        patch = json.loads(question_json)
+    except json.JSONDecodeError as exc:
+        raise QuestionError(f"question_json is not valid JSON: {exc}")
+    if isinstance(patch, list) and len(patch) == 1:
+        patch = patch[0]
+    if not isinstance(patch, dict) or not patch:
+        raise QuestionError("question_json must be ONE question object (the fields to change, or the whole question).")
+    base = dict(current or {})
+    if "type" in patch and current and str(patch["type"]).strip().lower() != current.get("type"):
+        base = {k: v for k, v in current.items() if k in _COMMON_KEYS}
+    if not current and "type" not in patch:
+        raise QuestionError("This question isn't in a format these tools can read, so give the WHOLE question (including \"type\").")
+    try:
+        return parse_questions(json.dumps([{**base, **patch}]))[0]
+    except QuestionError as exc:
+        raise QuestionError(str(exc).replace("Question 1", "The edited question", 1))
 
 
 def describe(questions: list[dict]) -> str:

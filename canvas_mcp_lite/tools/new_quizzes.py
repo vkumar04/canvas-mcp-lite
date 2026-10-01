@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import re
 from typing import Optional, Union
 
@@ -13,7 +14,15 @@ import httpx
 
 from ..client import CANVAS_API_URL, CanvasAPIError, canvas_paginated, canvas_request
 from ..util import format_date, get_course_id
-from .quiz_questions import QuestionError, new_quiz_item, parse_questions, total_points
+from .quiz_questions import (
+    QuestionError,
+    merge_edit,
+    new_quiz_item,
+    new_quiz_slug,
+    new_quiz_to_neutral,
+    parse_questions,
+    total_points,
+)
 
 
 def _quiz_api(path: str) -> str:
@@ -445,24 +454,273 @@ async def add_new_quiz_items(
     existing = await canvas_paginated(_quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}/items"))
     start = len(existing) + 1
     added, error = await _add_items(course_id, assignment_id, questions, start)
-
-    quiz = await canvas_request("GET", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"))
-    new_total = float(quiz.get("points_possible") or 0) + sum(q["points"] for q in questions[: len(added)])
-    quiz = await canvas_request(
-        "PATCH",
-        _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"),
-        json_body={"quiz": {"points_possible": new_total}},
-    ) or quiz
+    quiz, count = await _sync_points(course_id, assignment_id)
 
     lines = [
         f"Added {len(added)} question(s) to New Quiz '{quiz.get('title')}' (assignment ID: {assignment_id}). "
-        f"Now {start - 1 + len(added)} questions, {_fmt_points(quiz.get('points_possible'))} points."
+        f"Now {count} questions, {_fmt_points(quiz.get('points_possible'))} points."
     ]
     if added:
         lines.append("\n".join(added))
     if error:
         lines.append(f"STOPPED: {error}\nQuestions after that one were not added.")
     return "\n".join(lines)
+
+
+# -------------------------------------------------------------- editing
+
+
+async def _sync_points(course_id: int, assignment_id) -> tuple[dict, int]:
+    """Set the quiz total to the sum of its items. New Quizzes doesn't
+    recompute it when items are added, re-weighted, or deleted (verified
+    live), so the gradebook would keep the old total. Returns (quiz, item count)."""
+    items = await canvas_paginated(_quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}/items"))
+    total = sum(float(i.get("points_possible") or 0) for i in items)
+    quiz = await canvas_request("GET", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"))
+    if float(quiz.get("points_possible") or 0) != total:
+        quiz = await canvas_request(
+            "PATCH",
+            _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"),
+            json_body={"quiz": {"points_possible": total}},
+        ) or {**quiz, "points_possible": total}
+    return quiz, len(items)
+
+
+async def get_new_quiz_details(course_identifier: Union[str, int], assignment_id: Union[str, int]) -> str:
+    """Get one NEW QUIZ: its settings plus EVERY question with its item ID, printed in
+    the questions_json format (correct answers marked). Call this before
+    update_new_quiz_item or delete_new_quiz_item to get the item ID and the current
+    content to change. assignment_id comes from list_new_quizzes."""
+    course_id = await get_course_id(course_identifier)
+    try:
+        quiz = await canvas_request("GET", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"))
+    except CanvasAPIError as exc:
+        if exc.status_code == 404:
+            return f"assignment_id {assignment_id} isn't a New Quiz in course {course_id}. Use list_new_quizzes for ids."
+        raise
+    items = await canvas_paginated(_quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}/items"))
+    items = sorted(items, key=lambda i: i.get("position") or 0)
+    settings = quiz.get("quiz_settings") or {}
+    attempts = settings.get("multiple_attempts") or {}
+    if attempts.get("multiple_attempts_enabled"):
+        attempt_text = (str(attempts.get("max_attempts")) if attempts.get("attempt_limit") else "unlimited") + (
+            f" (keeps {attempts.get('score_to_keep', 'highest')})"
+        )
+    else:
+        attempt_text = "1"
+    limit = settings.get("session_time_limit_in_seconds") or 0
+    item_total = sum(float(i.get("points_possible") or 0) for i in items)
+    lines = [
+        f"Title: {quiz.get('title')} (assignment ID: {quiz.get('id')}, New Quiz)",
+        f"Published: {'Yes' if quiz.get('published') else 'No'}",
+        f"Due: {format_date(quiz.get('due_at'))}",
+        f"Available: {format_date(quiz.get('unlock_at'))} → {format_date(quiz.get('lock_at'))}",
+        f"Points: {_fmt_points(quiz.get('points_possible'))}"
+        + (f" (items add up to {_fmt_points(item_total)})" if float(quiz.get("points_possible") or 0) != item_total else ""),
+        f"Time Limit: {f'{limit // 60} min' if settings.get('has_time_limit') and limit else 'none'}",
+        f"Allowed Attempts: {attempt_text}",
+        f"Shuffle Questions: {'Yes' if settings.get('shuffle_questions') else 'No'} | "
+        f"Shuffle Answers: {'Yes' if settings.get('shuffle_answers') else 'No'} | "
+        f"One Question at a Time: {'Yes' if settings.get('one_at_a_time_type') == 'question' else 'No'}",
+        f"Link: {CANVAS_API_URL.rsplit('/api/', 1)[0]}/courses/{course_id}/assignments/{assignment_id}",
+        f"\nInstructions:\n{_text(quiz.get('instructions')) or '(none)'}",
+        f"\nQuestions ({len(items)}):",
+    ]
+    for number, item in enumerate(items, start=1):
+        entry = item.get("entry") or {}
+        kind = entry.get("interaction_type_slug") or item.get("entry_type")
+        locked = "" if item.get("entry_editable", True) else ", locked by Canvas"
+        lines.append(
+            f"\nQ{number} (item ID {item.get('id')}, {kind}, {_fmt_points(item.get('points_possible'))} pts{locked})"
+        )
+        neutral = new_quiz_to_neutral(item)
+        if neutral:
+            lines.append(json.dumps(neutral, ensure_ascii=False))
+        else:
+            lines.append(
+                "[This item type can't be edited with these tools — edit it in Canvas.] "
+                f"{_text(entry.get('item_body') or entry.get('title'))[:200]}"
+            )
+    if not items:
+        lines.append("(none yet — add them with add_new_quiz_items)")
+    return "\n".join(lines)
+
+
+async def update_new_quiz(
+    course_identifier: Union[str, int],
+    assignment_id: Union[str, int],
+    title: Optional[str] = None,
+    instructions: Optional[str] = None,
+    time_limit_minutes: Optional[int] = None,
+    allowed_attempts: Optional[int] = None,
+    shuffle_questions: Optional[bool] = None,
+    shuffle_answers: Optional[bool] = None,
+    one_question_at_a_time: Optional[bool] = None,
+    due_at: Optional[str] = None,
+    unlock_at: Optional[str] = None,
+    lock_at: Optional[str] = None,
+    published: Optional[bool] = None,
+) -> str:
+    """Change a NEW QUIZ's settings: title, instructions, time limit (0 removes it),
+    allowed_attempts (-1 = unlimited, highest score kept), shuffling, one question at a
+    time, dates, and published. Only the arguments you pass change. Dates are ISO-8601;
+    "" clears one. To edit questions use update_new_quiz_item / add_new_quiz_items /
+    delete_new_quiz_item. For a classic quiz use update_quiz.
+    Canvas refuses to unpublish a quiz students have already submitted."""
+    course_id = await get_course_id(course_identifier)
+    fields: dict = {}
+    settings: dict = {}
+    if title is not None:
+        fields["title"] = title
+    if instructions is not None:
+        fields["instructions"] = instructions
+    for key, value in (("due_at", due_at), ("unlock_at", unlock_at), ("lock_at", lock_at)):
+        if value is not None:
+            fields[key] = value.strip() or None
+    if time_limit_minutes is not None:
+        settings["has_time_limit"] = time_limit_minutes > 0
+        settings["session_time_limit_in_seconds"] = max(0, int(time_limit_minutes)) * 60
+    if allowed_attempts is not None:
+        if allowed_attempts == 1:
+            settings["multiple_attempts"] = {"multiple_attempts_enabled": False}
+        else:
+            settings["multiple_attempts"] = {
+                "multiple_attempts_enabled": True,
+                "attempt_limit": allowed_attempts > 0,
+                "max_attempts": allowed_attempts if allowed_attempts > 0 else None,
+                "score_to_keep": "highest",
+            }
+    if shuffle_questions is not None:
+        settings["shuffle_questions"] = shuffle_questions
+    if shuffle_answers is not None:
+        settings["shuffle_answers"] = shuffle_answers
+    if one_question_at_a_time is not None:
+        settings["one_at_a_time_type"] = "question" if one_question_at_a_time else "none"
+    if settings:
+        fields["quiz_settings"] = settings  # Canvas merges these into the existing settings
+    if not fields and published is None:
+        return "Nothing to update — provide at least one setting."
+
+    if fields:
+        try:
+            await canvas_request(
+                "PATCH", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"), json_body={"quiz": fields}
+            )
+        except CanvasAPIError as exc:
+            if exc.status_code == 404:
+                return f"assignment_id {assignment_id} isn't a New Quiz in course {course_id}. Use list_new_quizzes for ids."
+            raise
+    note = ""
+    if published is not None:
+        try:
+            await canvas_request(
+                "PUT", f"/courses/{course_id}/assignments/{assignment_id}", json_body={"assignment": {"published": published}}
+            )
+        except CanvasAPIError as exc:
+            note = f"\nCouldn't {'publish' if published else 'unpublish'} it (HTTP {exc.status_code}): {str(exc)[:200]}"
+    quiz = await canvas_request("GET", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}"))
+    settings = quiz.get("quiz_settings") or {}
+    attempts = settings.get("multiple_attempts") or {}
+    limit = settings.get("session_time_limit_in_seconds") or 0
+    return (
+        f"Updated New Quiz '{quiz.get('title')}' (assignment ID: {assignment_id}).{note}\n"
+        f"Published: {'Yes' if quiz.get('published') else 'No'}\n"
+        f"Due: {format_date(quiz.get('due_at'))} | Available: {format_date(quiz.get('unlock_at'))} → "
+        f"{format_date(quiz.get('lock_at'))}\n"
+        f"Time limit: {f'{limit // 60} min' if settings.get('has_time_limit') and limit else 'none'} | Attempts: "
+        + (
+            (str(attempts.get("max_attempts")) if attempts.get("attempt_limit") else "unlimited")
+            if attempts.get("multiple_attempts_enabled")
+            else "1"
+        )
+        + f"\nShuffle questions: {'Yes' if settings.get('shuffle_questions') else 'No'} | "
+        f"Shuffle answers: {'Yes' if settings.get('shuffle_answers') else 'No'} | "
+        f"One at a time: {'Yes' if settings.get('one_at_a_time_type') == 'question' else 'No'}"
+    )
+
+
+async def _get_item(course_id: int, assignment_id, item_id) -> Optional[dict]:
+    try:
+        return await canvas_request("GET", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}/items/{item_id}"))
+    except CanvasAPIError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+
+
+async def update_new_quiz_item(
+    course_identifier: Union[str, int],
+    assignment_id: Union[str, int],
+    item_id: Union[str, int],
+    question_json: str,
+) -> str:
+    """Edit one question on a NEW QUIZ in place. Get item_id and the current content
+    from get_new_quiz_details, which prints each question in this same format.
+    question_json is ONE question object; only the keys you give change, e.g.
+      {"points": 2}
+      {"text": "Reworded stem?"}
+      {"answers": [{"text": "A"}, {"text": "B", "correct": true}]}   (replaces all answers)
+    Format is the same as create_new_quiz's questions_json. Set a feedback key to ""
+    to remove it. The quiz total is re-synced to the sum of its questions. Canvas
+    can't change an item's TYPE in place: delete_new_quiz_item, then
+    add_new_quiz_items (the new one goes at the end). Edits are live for students
+    immediately on a published quiz."""
+    course_id = await get_course_id(course_identifier)
+    existing = await _get_item(course_id, assignment_id, item_id)
+    if existing is None:
+        return f"Item {item_id} isn't on New Quiz {assignment_id}. Use get_new_quiz_details for item IDs."
+    try:
+        question = merge_edit(new_quiz_to_neutral(existing), question_json)
+    except QuestionError as exc:
+        return f"Nothing changed. {exc}"
+    old_slug = (existing.get("entry") or {}).get("interaction_type_slug")
+    if old_slug and new_quiz_slug(question["type"]) != old_slug:
+        return (
+            f"Nothing changed. Canvas can't turn a {old_slug} item into a {question['type']} question in place. "
+            f"Use delete_new_quiz_item (item {item_id}) and then add_new_quiz_items with the new question."
+        )
+    payload = new_quiz_item(question, existing.get("position") or 1)
+    payload.pop("position")
+    # PATCH merges into the stored item, so send empty feedback explicitly
+    # or removed feedback would survive the edit.
+    payload["entry"].setdefault("feedback", {})
+    if question["type"] == "multiple_choice":
+        payload["entry"].setdefault("answer_feedback", {})
+    try:
+        updated = await canvas_request(
+            "PATCH",
+            _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}/items/{item_id}"),
+            json_body={"item": payload},
+        )
+    except CanvasAPIError as exc:
+        if exc.status_code in (400, 403, 409, 422):
+            return f"Canvas rejected the edit (HTTP {exc.status_code}): {str(exc)[:300]}"
+        raise
+    quiz, count = await _sync_points(course_id, assignment_id)
+    return (
+        f"Updated item {item_id} on New Quiz '{quiz.get('title')}' (assignment ID: {assignment_id}).\n"
+        f"Now: {json.dumps(new_quiz_to_neutral(updated or {}) or question, ensure_ascii=False)}\n"
+        f"Quiz total: {count} questions, {_fmt_points(quiz.get('points_possible'))} points."
+    )
+
+
+async def delete_new_quiz_item(
+    course_identifier: Union[str, int], assignment_id: Union[str, int], item_id: Union[str, int]
+) -> str:
+    """PERMANENTLY delete one question from a NEW QUIZ (item_id from
+    get_new_quiz_details). This cannot be undone. The quiz total is re-synced to the
+    sum of the remaining questions."""
+    course_id = await get_course_id(course_identifier)
+    existing = await _get_item(course_id, assignment_id, item_id)
+    if existing is None:
+        return f"Item {item_id} isn't on New Quiz {assignment_id}. Use get_new_quiz_details for item IDs."
+    await canvas_request("DELETE", _quiz_api(f"/courses/{course_id}/quizzes/{assignment_id}/items/{item_id}"))
+    quiz, count = await _sync_points(course_id, assignment_id)
+    stem = _text((existing.get("entry") or {}).get("item_body"))[:80]
+    return (
+        f"Deleted item {item_id} ({stem!r}) from New Quiz '{quiz.get('title')}'. "
+        f"Now {count} questions, {_fmt_points(quiz.get('points_possible'))} points."
+    )
 
 
 async def delete_new_quiz(course_identifier: Union[str, int], assignment_id: Union[str, int]) -> str:

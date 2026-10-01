@@ -394,8 +394,13 @@ def test_add_new_quiz_items_positions_after_existing_and_bumps_points(monkeypatc
     calls = []
     monkeypatch.setattr(new_quizzes, "canvas_request", _new_fake(calls))
 
+    listings = iter([
+        [{"id": "1"}, {"id": "2"}],  # before: positions continue after these
+        [{"id": "1"}, {"id": "2"}, {"id": "3", "points_possible": 2.0}, {"id": "4", "points_possible": 1.0}],
+    ])
+
     async def fake_paginated(path, params=None, max_pages=20):
-        return [{"id": "1"}, {"id": "2"}]
+        return next(listings)
 
     monkeypatch.setattr(new_quizzes, "canvas_paginated", fake_paginated)
     out = asyncio.run(new_quizzes.add_new_quiz_items("ENG101", 777, json.dumps(QUESTIONS[:2])))
