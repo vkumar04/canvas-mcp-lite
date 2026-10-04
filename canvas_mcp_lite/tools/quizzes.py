@@ -8,6 +8,7 @@ from ..util import format_date, get_course_id
 from .quiz_questions import (
     QuestionError,
     _plain,
+    classic_answer_key,
     classic_question,
     classic_to_neutral,
     merge_edit,
@@ -88,6 +89,7 @@ async def get_quiz_details(course_identifier: Union[str, int], quiz_id: Union[st
                 f"[This question type can't be edited with these tools — edit it in Canvas.] "
                 f"{_plain(question.get('question_text') or '')[:200]}"
             )
+            lines.extend(f"  {line}" for line in classic_answer_key(question))
     if not questions:
         lines.append("(none yet — add them with add_quiz_questions)")
     return "\n".join(lines)

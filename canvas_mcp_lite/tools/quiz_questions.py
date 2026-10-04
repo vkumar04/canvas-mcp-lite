@@ -702,6 +702,66 @@ def new_quiz_to_neutral(item: dict) -> dict | None:
     )
 
 
+# Read-only answer keys for the types above that come back as None, so a
+# caller can still check what Canvas accepts (e.g. after an edit in the UI).
+
+
+def _quoted(values: list) -> str:
+    return ", ".join(f'"{v}"' for v in values) or "(none)"
+
+
+def classic_answer_key(qd: dict) -> list[str]:
+    """One line per blank (fill-in-multiple-blanks, multiple dropdowns) or
+    one line of correct answers for any other Classic type with answers."""
+    answers = qd.get("answers") or []
+    qtype = qd.get("question_type")
+    if qtype in ("fill_in_multiple_blanks_question", "multiple_dropdowns_question"):
+        blanks: dict[str, list[dict]] = {}
+        for a in answers:
+            blanks.setdefault(str(a.get("blank_id") or "?"), []).append(a)
+        lines = []
+        for blank, options in blanks.items():
+            correct = [str(a.get("text", "")).strip() for a in options if (a.get("weight") or 0) > 0]
+            if qtype == "fill_in_multiple_blanks_question":
+                lines.append(f"[{blank}] accepts: {_quoted(correct)}")
+            else:
+                others = [str(a.get("text", "")).strip() for a in options if not (a.get("weight") or 0) > 0]
+                lines.append(f"[{blank}] correct: {_quoted(correct)}; other options: {_quoted(others)}")
+        return lines
+    correct = [str(a.get("text", "")).strip() for a in answers if (a.get("weight") or 0) > 0 and str(a.get("text", "")).strip()]
+    return [f"Correct: {_quoted(correct)}"] if correct else []
+
+
+_MATCH_RULES = {
+    "TextContainsAnswer": " (response must contain it)",
+    "TextCloseEnough": " (close spelling accepted)",
+    "TextRegex": " (regular expression)",
+}
+
+
+def new_quiz_answer_key(item: dict) -> list[str]:
+    """One line per blank of a fill-in-the-blank item (open entry, dropdown,
+    or word bank). Other item types return []."""
+    e = item.get("entry") or {}
+    if e.get("interaction_type_slug") != "rich-fill-blank":
+        return []
+    rules = {r.get("id"): r for r in (e.get("scoring_data") or {}).get("value") or [] if isinstance(r, dict)}
+    lines = []
+    for n, blank in enumerate((e.get("interaction_data") or {}).get("blanks") or [], start=1):
+        rule = rules.get(blank.get("id")) or {}
+        value = (rule.get("scoring_data") or {}).get("value")
+        kind = blank.get("answer_type") or "?"
+        if kind == "openEntry":
+            accepted = [str(v) for v in (value if isinstance(value, list) else [value]) if str(v or "").strip()]
+            lines.append(f"Blank {n} (typed) accepts: {_quoted(accepted)}{_MATCH_RULES.get(rule.get('scoring_algorithm'), '')}")
+        else:
+            choices = {c.get("id"): _plain(str(c.get("item_body") or "")) for c in blank.get("choices") or []}
+            correct = choices.get(value, (rule.get("scoring_data") or {}).get("blank_text") or "?")
+            others = [text for cid, text in choices.items() if cid != value]
+            lines.append(f"Blank {n} ({kind}) correct: \"{correct}\"; other options: {_quoted(others)}")
+    return lines
+
+
 _COMMON_KEYS = ("text", "points", "title", "correct_feedback", "incorrect_feedback", "general_feedback")
 
 

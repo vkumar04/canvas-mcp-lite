@@ -8,8 +8,10 @@ from canvas_mcp_lite.tools import new_quizzes, quizzes
 from canvas_mcp_lite.tools.quiz_questions import (
     QuestionError,
     _readable,
+    classic_answer_key,
     classic_to_neutral,
     merge_edit,
+    new_quiz_answer_key,
     new_quiz_item,
     new_quiz_to_neutral,
     parse_questions,
@@ -347,3 +349,28 @@ def test_get_new_quiz_details_prints_editable_json(monkeypatch):
     first = out.split("Q1 (item ID 50, choice, 2 pts)\n")[1].split("\n")[0]
     assert json.loads(first)["answers"][0]["correct"] is True
     assert "can't be edited with these tools" in out
+
+
+def test_answer_keys_for_types_the_format_cant_express():
+    fimb = {"question_type": "fill_in_multiple_blanks_question", "answers": [
+        {"text": "pre-research", "weight": 100, "blank_id": "phase"},
+        {"text": "pre research", "weight": 100, "blank_id": "phase"},
+        {"text": "Atkins", "weight": 100, "blank_id": "library"},
+    ]}
+    assert classic_to_neutral(fimb) is None
+    assert classic_answer_key(fimb) == ['[phase] accepts: "pre-research", "pre research"', '[library] accepts: "Atkins"']
+
+    item = {"entry_type": "Item", "entry": {"interaction_type_slug": "rich-fill-blank",
+        "interaction_data": {"blanks": [
+            {"id": "b1", "answer_type": "dropdown", "choices": [{"id": "c1", "item_body": "can"}, {"id": "c2", "item_body": "cannot"}]},
+            {"id": "b2", "answer_type": "openEntry"},
+        ]},
+        "scoring_data": {"value": [
+            {"id": "b1", "scoring_data": {"value": "c2", "blank_text": "cannot"}, "scoring_algorithm": "Equivalence"},
+            {"id": "b2", "scoring_data": {"value": "visual", "blank_text": "visual"}, "scoring_algorithm": "TextContainsAnswer"},
+        ]}}}
+    assert new_quiz_to_neutral(item) is None
+    assert new_quiz_answer_key(item) == [
+        'Blank 1 (dropdown) correct: "cannot"; other options: "can"',
+        'Blank 2 (typed) accepts: "visual" (response must contain it)',
+    ]

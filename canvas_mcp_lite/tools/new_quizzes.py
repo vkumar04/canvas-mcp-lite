@@ -17,6 +17,7 @@ from ..util import format_date, get_course_id
 from .quiz_questions import (
     QuestionError,
     merge_edit,
+    new_quiz_answer_key,
     new_quiz_item,
     new_quiz_slug,
     new_quiz_to_neutral,
@@ -541,6 +542,7 @@ async def get_new_quiz_details(course_identifier: Union[str, int], assignment_id
                 "[This item type can't be edited with these tools — edit it in Canvas.] "
                 f"{_text(entry.get('item_body') or entry.get('title'))[:200]}"
             )
+            lines.extend(f"  {line}" for line in new_quiz_answer_key(item))
     if not items:
         lines.append("(none yet — add them with add_new_quiz_items)")
     return "\n".join(lines)
