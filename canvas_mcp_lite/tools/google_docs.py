@@ -45,19 +45,19 @@ async def _explain_api_error(exc: GoogleAPIError, doc_id: str) -> str:
 
 
 async def google_docs_status() -> str:
-    """Check whether Google Docs/Slides access is set up on this server: which
+    """Check whether Google Docs/Slides/Forms access is set up on this server: which
     credentials are present, which Google account is connected, and the next
     setup step if anything is missing. Run this first when a Google Docs or
-    Google Slides tool reports a configuration problem."""
+    Google Slides or Google Forms tool reports a configuration problem."""
     has_client = bool(
         os.environ.get("GOOGLE_OAUTH_CLIENT_ID") and os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
     )
-    lines = ["Google Docs / Slides setup:"]
+    lines = ["Google Docs / Slides / Forms setup:"]
     lines.append(f"- OAuth client (admin-provided): {'configured' if has_client else 'MISSING'}")
     if not has_client:
         lines.append(
             "\nNext step (server admin, one-time): at console.cloud.google.com enable "
-            "the Google Drive, Docs, and Slides APIs, publish the OAuth consent screen, create a 'Web "
+            "the Google Drive, Docs, Slides, and Forms APIs, publish the OAuth consent screen, create a 'Web "
             "application' OAuth client with authorized redirect URI "
             f"{redirect_uri() or '<server URL>/oauth/google/callback'}, and set "
             "GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET in the server env."

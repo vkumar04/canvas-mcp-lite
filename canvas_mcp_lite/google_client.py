@@ -35,7 +35,7 @@ SETUP_MESSAGE = (
     "The instructor's Google account isn't connected yet. Run the "
     "google_docs_status tool to see what's missing, then connect_google_docs to "
     "get a sign-in link the instructor opens in their browser — approving it "
-    "activates Google Docs and Slides access. (Local stdio servers can run the "
+    "activates Google Docs, Slides, and Forms access. (Local stdio servers can run the "
     "`canvas-mcp-google-auth` terminal command instead.)"
 )
 

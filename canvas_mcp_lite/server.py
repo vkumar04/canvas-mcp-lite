@@ -19,6 +19,7 @@ from .tools import (
     discussions,
     files,
     google_docs,
+    google_forms,
     google_slides,
     grading,
     integrity,
@@ -72,8 +73,8 @@ async def homepage(request: Request) -> HTMLResponse:
         "<p>A private teaching-assistant service (an MCP server) used by an "
         "instructor to manage Canvas LMS coursework and provide feedback on "
         "student work, including comments on Google Docs and Google Slides that "
-        "students share with the instructor, and editing the instructor's own "
-        "Google Slides lecture decks.</p>"
+        "students share with the instructor, editing the instructor's own "
+        "Google Slides lecture decks, and building the instructor's Google Forms.</p>"
         "<p><a href='/privacy'>Privacy policy</a></p>"
         "</body></html>"
     )
@@ -93,8 +94,8 @@ async def privacy_policy(request: Request) -> HTMLResponse:
         "service accesses Google Drive solely to: (1) read the text of documents "
         "and presentations students have shared with the instructor for grading, "
         "(2) post feedback comments on those files on the instructor's behalf, and "
-        "(3) read, create, and edit the instructor's own Google Slides decks at "
-        "the instructor's request.</p>"
+        "(3) read, create, and edit the instructor's own Google Slides decks and "
+        "Google Forms (including reading form responses) at the instructor's request.</p>"
         "<p>The service stores only the OAuth credentials needed to act on the "
         "instructor's behalf. It does not store document contents, sell or share "
         "any data with third parties, use data for advertising, or transfer data "
@@ -136,6 +137,9 @@ READ_TOOLS = [
     google_slides.list_google_slides,
     google_slides.read_google_slides,
     google_slides.list_google_slides_comments,
+    google_forms.list_google_forms,
+    google_forms.read_google_form,
+    google_forms.list_google_form_responses,
     quizzes.list_quizzes,
     quizzes.get_quiz_details,
     quizzes.list_quiz_submissions,
@@ -183,6 +187,10 @@ WRITE_TOOLS = [
     google_slides.move_google_slide,
     google_slides.duplicate_google_slide,
     google_slides.comment_on_google_slides,
+    google_forms.create_google_form,
+    google_forms.add_google_form_questions,
+    google_forms.update_google_form_question,
+    google_forms.update_google_form,
     quizzes.create_quiz,
     quizzes.add_quiz_questions,
     quizzes.update_quiz,
@@ -215,6 +223,7 @@ DELETE_TOOLS = [
     files.delete_course_file,
     peer_review.delete_peer_review,
     google_slides.delete_google_slide,
+    google_forms.delete_google_form_question,
     quizzes.delete_quiz,
     quizzes.delete_quiz_question,
     new_quizzes.delete_new_quiz,
